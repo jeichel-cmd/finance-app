@@ -12,6 +12,7 @@ import {
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc } from './format.js';
 import { lineChart, barChart } from './charts.js';
 import { icons } from './icons.js';
+import { BRANDS, brandOf, logoSvg } from './logos.js';
 
 const $app = document.getElementById('app');
 const ACCOUNT_COLORS = ['#1D4ED8', '#9F2D20', '#0F766E', '#7C3AED', '#A16207', '#BE185D', '#0E7490', '#15171A'];
@@ -146,6 +147,8 @@ function initials(name) {
 }
 
 function avatar(acc) {
+  const b = brandOf(acc);
+  if (b) return `<span class="avatar logo" style="background:${b.bg}" title="${esc(b.name)}">${logoSvg(b)}</span>`;
   return `<span class="avatar" style="background:${esc(acc.color)}">${esc(initials(acc.name))}</span>`;
 }
 
@@ -394,6 +397,11 @@ function viewAccountEdit(id) {
         <select name="fundedFrom"><option value="">The ${esc(acc.name || 'wallet')} balance</option>${banks.map((b) => `<option value="${esc(b.id)}" ${b.id === acc.fundedFrom ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
         <span class="hint">PayPal often takes payments straight from your bank. Choosing the bank here counts each payment once, in PayPal, and treats the bank debit as a transfer.</span>
       </label>
+      <label class="field">Logo<select name="brand">
+        <option value="" ${!acc.brand ? 'selected' : ''}>Automatic</option>
+        ${BRANDS.map((b) => `<option value="${b.id}" ${b.id === acc.brand ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}
+        <option value="none" ${acc.brand === 'none' ? 'selected' : ''}>No logo (initials)</option>
+      </select><span class="hint">Choose one when the bank isn't in the account's title, e.g. a joint account at DKB.</span></label>
       ${shareAndCurrencyFields(acc)}
       ${isNew ? `<label class="field">Current balance (optional)<input name="balance" inputmode="decimal" placeholder="0,00"></label>` : ''}
       <button class="button primary" type="submit">${isNew ? 'Add account' : 'Save'}</button>
@@ -1103,15 +1111,16 @@ const forms = {
     const fundedFrom = kind === 'wallet' ? f.get('fundedFrom') || null : null;
     const currency = f.get('currency') || 'EUR';
     const share = Number(f.get('share')) || 100;
+    const brand = f.get('brand') || undefined;
     if (id === 'new') {
-      const acc = { id: uid(), name, kind, fundedFrom, currency, share, color: ACCOUNT_COLORS[state.accounts.length % ACCOUNT_COLORS.length], createdAt: new Date().toISOString() };
+      const acc = { id: uid(), name, kind, fundedFrom, currency, share, brand, color: ACCOUNT_COLORS[state.accounts.length % ACCOUNT_COLORS.length], createdAt: new Date().toISOString() };
       state.accounts.push(acc);
       const bal = parseTyped(f.get('balance'));
       if (bal) state.transactions.push({ id: uid(), accountId: acc.id, date: today(), payee: 'Starting balance', amount: bal, category: 'correction', source: 'opening', createdAt: new Date().toISOString() });
       commit({ rerender: false });
       go(`#/account/${acc.id}`);
     } else {
-      Object.assign(accountById(id), { name, kind, fundedFrom, currency, share });
+      Object.assign(accountById(id), { name, kind, fundedFrom, currency, share, brand });
       refreshRate();
       commit({ rerender: false });
       go(`#/account/${id}`);

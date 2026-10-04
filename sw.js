@@ -1,5 +1,5 @@
 // Keeps the app working offline. The app never talks to any server except the one it was installed from.
-const VERSION = 'v3';
+const VERSION = 'v4';
 const SHELL = `shell-${VERSION}`;
 const READER = 'reader-v1';
 
@@ -21,6 +21,7 @@ const SHELL_FILES = [
   'src/format.js',
   'src/charts.js',
   'src/icons.js',
+  'src/logos.js',
 ];
 
 self.addEventListener('install', (e) => {

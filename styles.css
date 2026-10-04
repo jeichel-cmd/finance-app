@@ -290,3 +290,5 @@ a.row:active, .row a.row-main:active { background: var(--surface-2); }
 [data-bal] .cat-line { gap: 10px; }
 [data-bal] .row-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 [data-bal] .amount-input { width: 130px; flex: none; text-align: right; font-weight: 600; }
+.avatar.logo svg { display: block; }
+.logo-text { font-size: 12px; font-weight: 800; letter-spacing: -0.02em; }
