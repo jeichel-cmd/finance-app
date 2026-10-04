@@ -217,7 +217,7 @@ step('own transfer');
 // Hide amounts for showing the app to someone.
 await page.goto(base + '#/');
 await page.getByRole('button', { name: 'Hide amounts' }).click();
-if (!/€••••/.test(await page.locator('.big-number').textContent())) throw new Error('total not hidden');
+if (!/€\*\*\*/.test(await page.locator('.big-number').textContent())) throw new Error('total not hidden');
 if (/\d,\d\d\d\.\d\d/.test(await page.locator('main').innerText())) throw new Error('an amount is still visible');
 await shot('12c-hidden');
 await page.getByRole('button', { name: 'Show amounts' }).click();
