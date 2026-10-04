@@ -1,12 +1,15 @@
 // Money is stored as integer cents everywhere. Dates are ISO strings (YYYY-MM-DD).
 
 const locale = (typeof navigator !== 'undefined' && navigator.language) || 'de-DE';
-const eur = new Intl.NumberFormat(locale, { style: 'currency', currency: 'EUR' });
-const eurShort = new Intl.NumberFormat(locale, { style: 'currency', currency: 'EUR', maximumFractionDigits: 0 });
+const formatters = new Map();
+function formatter(currency, short) {
+  const key = currency + short;
+  if (!formatters.has(key)) formatters.set(key, new Intl.NumberFormat(locale, { style: 'currency', currency, ...(short ? { maximumFractionDigits: 0 } : {}) }));
+  return formatters.get(key);
+}
 
-export function money(cents, { sign = false, short = false } = {}) {
-  const f = short ? eurShort : eur;
-  const text = f.format(Math.abs(cents) / 100);
+export function money(cents, { sign = false, short = false, currency = 'EUR' } = {}) {
+  const text = formatter(currency, short).format(Math.abs(cents) / 100);
   if (cents < 0) return '− ' + text;
   if (sign && cents > 0) return '+ ' + text;
   return text;
@@ -80,7 +83,7 @@ export function ago(s) {
 // Parses what a person types into an amount field: "12,50", "-1.234,56", "€ 9.99".
 export function parseTyped(text) {
   if (text == null) return null;
-  let s = String(text).trim().replace(/[€\s]|EUR/gi, '').replace('−', '-');
+  let s = String(text).trim().replace(/[€$\s]|EUR|USD|US/gi, '').replace('−', '-');
   if (!s) return null;
   const neg = s.startsWith('-');
   s = s.replace(/^[+-]/, '');

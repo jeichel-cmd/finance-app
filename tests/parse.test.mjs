@@ -19,7 +19,8 @@ test('finds signed euro amounts and skips other currencies and percentages', () 
   assert.deepEqual(findAmounts('−€24.80').map((a) => a.cents), [-2480]);
   assert.deepEqual(findAmounts('BTC 0.0342 BTC'), []);
   assert.deepEqual(findAmounts('Performance +4,21 %'), []);
-  assert.deepEqual(findAmounts('100 USD'), []);
+  assert.deepEqual(findAmounts('100 USD').map((a) => [a.cents, a.currency]), [[10000, 'USD']]);
+  assert.deepEqual(findAmounts('Total $1,950.25').map((a) => [a.cents, a.currency]), [[195025, 'USD']]);
   assert.deepEqual(findAmounts('IBAN DE12 3456 7890'), []);
   assert.deepEqual(findAmounts('14:32').length, 0);
 });
@@ -83,4 +84,29 @@ test('joins a payee and its amount that sit on the same row', async () => {
     { text: 'Oct 2', top: 345, bottom: 370, left: 40 },
   ]);
   assert.deepEqual(rows.map((r) => r.text), ['Spotify  -€10.99', 'Oct 2']);
+});
+
+test('reads a DKB-style list: wrapped payees, icon noise and date captions below', () => {
+  const r = parseScreenshot(L(
+    'Girokonto', 'Account balance incl. pending transactions', { text: '€1,597.63', height: 70 }, 'Detail', 'Future Bookings',
+    'SumUp *Cafe am Markt', 'Ulm DE  -€12.00', '©', '© Pending - 05.10.26',
+    'Google Play  -€17.99', '© Pending - 05.10.26',
+    'PayPal Europe S.a.r.l. et Cie', '-€40.00', 'S.CA', '05.10.26 - Direct debit', 'Today',
+  ), '2026-10-05');
+  assert.equal(r.balance, 159763);
+  assert.equal(r.provider, null);
+  assert.deepEqual(r.transactions.map((t) => [t.payee, t.amount, t.date]), [
+    ['SumUp Cafe am Markt Ulm DE', -1200, '2026-10-05'],
+    ['Google Play', -1799, '2026-10-05'],
+    ['PayPal Europe S.a.r.l. et Cie', -4000, '2026-10-05'],
+  ]);
+});
+
+test('reads an overview screen as account balances, not transactions', async () => {
+  const { parseBalances } = await import('../src/parse.js');
+  const r = parseBalances(L('7:41 85%', 'Home', '€1,597.63 ©', 'Current accounts (2/3) >', 'Girokonto  €1,597.63', '[111]', 'More',
+    'Tagesgeld  €0.00', 'Girokonto  €1,639.57', 'Personalize', 'Home  Cards  Orders  Products  Profile'));
+  assert.deepEqual(r.accounts.map((a) => [a.label, a.amount]), [['Girokonto', 159763], ['Tagesgeld', 0], ['Girokonto', 163957]]);
+  const k = parseBalances(L('Kraken', 'Total balance', '$1,950.00'));
+  assert.deepEqual(k.accounts.map((a) => [a.label, a.amount, a.currency]), [['Total balance', 195000, 'USD']]);
 });

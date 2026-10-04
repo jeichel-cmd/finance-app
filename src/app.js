@@ -1,12 +1,13 @@
 import * as store from './store.js';
 import { readScreenshot, warmUp } from './ocr.js';
-import { parseScreenshot } from './parse.js';
+import { parseScreenshot, parseBalances } from './parse.js';
 import { suggestCategory, learn, normalizePayee } from './categorize.js';
 import {
   emptyState, ACCOUNT_KINDS, isInvestment, category, accountBalance, netWorth, netWorthSeries, accountSeries,
   changeSince, periodSummary, monthlySpending, spendingInsight, categorySuggestions, uncategorisedCount,
   findExisting, payPalMatch, checkDiff, openChecks, accountStatus, fixSuggestions, correctionTx, refreshChecks,
-  countsOnBalance,
+  countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
+  monthlyReserve, FREQUENCIES,
 } from './model.js';
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc } from './format.js';
 import { lineChart, barChart } from './charts.js';
@@ -60,11 +61,13 @@ function render() {
     case 'account-edit': return paint(viewAccountEdit(id));
     case 'spending': return paint(viewSpending(r.q.get('p') || 'month'), { tabs: true, active: 'spending' });
     case 'category': return paint(viewCategory(id, r.q.get('p') || 'month'), { tabs: true, active: 'spending' });
-    case 'scan': return paint(viewScan(r.q.get('account')), { tabs: true, active: 'scan' });
+    case 'scan': return paint(viewScan(r.q.get('account'), r.q.get('mode')), { tabs: true, active: 'scan' });
+    case 'plan': return paint(viewPlan(), { tabs: true, active: 'plan' });
+    case 'plan-edit': return paint(viewPlanEdit(id, r.q));
     case 'review': return paint(viewReview());
     case 'fix': return paint(viewFix(id));
     case 'tx': return paint(viewTx(id, r.q));
-    case 'settings': return paint(viewSettings());
+    case 'settings': return paint(viewSettings(), { tabs: true, active: 'settings' });
     case 'categories': return paint(viewCategories());
     default: go('#/');
   }
@@ -75,8 +78,10 @@ function tabBar(active) {
     `<a class="tab ${active === key ? 'active' : ''}" href="${href}" ${active === key ? 'aria-current="page"' : ''}>${icon}<span>${label}</span></a>`;
   return `<nav class="tabbar" aria-label="Main">
     ${tab('#/', 'home', icons.home, 'Overview')}
-    <a class="scan-button ${active === 'scan' ? 'active' : ''}" href="#/scan" aria-label="Add a screenshot">${icons.scan}</a>
     ${tab('#/spending', 'spending', icons.pie, 'Spending')}
+    <a class="scan-button ${active === 'scan' ? 'active' : ''}" href="#/scan" aria-label="Add a screenshot">${icons.scan}</a>
+    ${tab('#/plan', 'plan', icons.calendar, 'Plan')}
+    ${tab('#/settings', 'settings', icons.gear, 'More')}
   </nav>`;
 }
 
@@ -131,6 +136,7 @@ function lockNow() {
 // ---------- helpers ----------
 
 const accountById = (id) => state.accounts.find((a) => a.id === id) || null;
+const cur = (acc) => ({ currency: currencyOf(acc) });
 const catName = (id) => (id ? category(state, id)?.name || 'Uncategorised' : 'Uncategorised');
 const catColor = (id) => (id ? category(state, id)?.color || '#94A3B8' : '#94A3B8');
 
@@ -174,7 +180,7 @@ function txRow(t, { showAccount = false } = {}) {
   ].filter(Boolean).join('');
   return `<a class="row" href="#/tx/${esc(t.id)}">
     <span class="row-main"><span class="row-title">${esc(t.payee || 'No description')}</span><span class="row-sub">${sub}</span></span>
-    <span class="row-end"><span class="amount ${signedClass(t.amount)} ${countsOnBalance(t) ? '' : 'muted'}">${money(t.amount, { sign: true })}</span></span>
+    <span class="row-end"><span class="amount ${signedClass(t.amount)} ${countsOnBalance(t) ? '' : 'muted'}">${money(t.amount, { sign: true, ...cur(acc) })}</span></span>
   </a>`;
 }
 
@@ -200,8 +206,16 @@ function statusLine(acc) {
   return `Checked ${ago(s.last.date)}`;
 }
 
-function diffSentence(diff, subject = 'the app') {
-  return diff > 0 ? `${money(diff)} more than ${subject}` : `${money(-diff)} less than ${subject}`;
+function diffSentence(diff, acc = null, subject = 'the app') {
+  return diff > 0 ? `${money(diff, cur(acc))} more than ${subject}` : `${money(-diff, cur(acc))} less than ${subject}`;
+}
+
+// The account's own balance, plus what counts towards your total when it's shared or in dollars.
+function countsLine(acc, bal) {
+  const parts = [];
+  if (shareOf(acc) < 1) parts.push(`${Math.round(shareOf(acc) * 100)}% yours`);
+  if (currencyOf(acc) !== 'EUR' || shareOf(acc) < 1) parts.push(`${currencyOf(acc) !== 'EUR' ? '≈ ' : ''}${money(Math.round(toEur(state, bal, currencyOf(acc)) * shareOf(acc)))}`);
+  return parts.join(': ');
 }
 
 // ---------- setup and lock ----------
@@ -255,7 +269,6 @@ function viewOverview() {
     <span class="eyebrow">${esc(monthLabel(t))}</span>
     <span class="topbar-extra">
       <button class="icon-button" data-action="lock" aria-label="Lock">${icons.lock}</button>
-      <a class="icon-button" href="#/settings" aria-label="Settings">${icons.gear}</a>
     </span>
   </div>`;
   if (!state.accounts.length) {
@@ -279,11 +292,16 @@ function viewOverview() {
     return `<a class="banner" href="#/fix/${esc(c.id)}">
       ${icons.warn}
       <span class="row-main"><span class="row-title">${esc(acc ? acc.name : 'Your total')} doesn't match</span>
-      <span class="row-sub">Screenshot shows ${diffSentence(diff)}</span></span>
+      <span class="row-sub">Screenshot shows ${diffSentence(diff, acc)}</span></span>
       <span class="banner-action">Fix</span>
     </a>`;
   }).join('');
-  const accounts = [...state.accounts].sort((a, b) => accountBalance(state, b.id) - accountBalance(state, a.id));
+  const accounts = [...state.accounts].sort((a, b) => yourValue(state, b) - yourValue(state, a));
+  const soon = planTimeline(state, 2).flatMap((m) => m.items).filter((x) => x.date <= addDays(t, 30));
+  const comingUp = soon.length ? `<section>
+      <div class="section-head"><h2>Coming up</h2><a class="link" href="#/plan">Plan</a></div>
+      <div class="list">${soon.slice(0, 3).map((x) => `<a class="row" href="#/plan-edit/${esc(x.plan.id)}"><span class="row-main"><span class="row-title">${esc(x.plan.name)}</span><span class="row-sub">${esc(dateLabel(x.date))}</span></span><span class="row-end"><span class="amount ${signedClass(x.plan.amount)}">${money(x.plan.amount, { sign: true })}</span></span></a>`).join('')}</div>
+    </section>` : '';
   return `<main class="page">${header}
     <section class="hero">
       <div class="label">Total</div>
@@ -298,14 +316,16 @@ function viewOverview() {
         ${accounts.map((a) => {
           const bal = accountBalance(state, a.id);
           const ch = changeSince(state, monthStart(t), a.id);
+          const counts = countsLine(a, bal);
           return `<a class="row" href="#/account/${esc(a.id)}">
             ${avatar(a)}
             <span class="row-main"><span class="row-title">${esc(a.name)}</span><span class="row-sub">${statusLine(a)}</span></span>
-            <span class="row-end"><span class="amount">${money(bal)}</span>${ch ? `<span class="small ${signedClass(ch)}">${money(ch, { sign: true })}</span>` : ''}</span>
+            <span class="row-end"><span class="amount">${money(bal, cur(a))}</span>${counts ? `<span class="small muted">${esc(counts)}</span>` : ch ? `<span class="small ${signedClass(ch)}">${money(ch, { sign: true, ...cur(a) })}</span>` : ''}</span>
           </a>`;
         }).join('')}
       </div>
     </section>
+    ${comingUp}
   </main>`;
 }
 
@@ -321,15 +341,16 @@ function viewAccount(id) {
   const s = accountStatus(state, acc);
   const bank = fundingBank(acc);
   let status = '';
-  if (s.state === 'mismatch') status = `<a class="banner" href="#/fix/${esc(s.last.id)}">${icons.warn}<span class="row-main"><span class="row-title">Doesn't match the screenshot from ${esc(dateLabel(s.last.date))}</span><span class="row-sub">Screenshot shows ${diffSentence(checkDiff(state, s.last).diff)}</span></span><span class="banner-action">Fix</span></a>`;
+  if (s.state === 'mismatch') status = `<a class="banner" href="#/fix/${esc(s.last.id)}">${icons.warn}<span class="row-main"><span class="row-title">Doesn't match the screenshot from ${esc(dateLabel(s.last.date))}</span><span class="row-sub">Screenshot shows ${diffSentence(checkDiff(state, s.last).diff, acc)}</span></span><span class="banner-action">Fix</span></a>`;
   else if (s.state === 'stale') status = `<p class="note">The last screenshot is from ${esc(dateLabel(s.last.date))}. Add a new one to keep this account up to date.</p>`;
   else if (s.state === 'ok') status = `<p class="note ok">${icons.check}<span>Matched the screenshot from ${esc(dateLabel(s.last.date))}.</span></p>`;
   return `<main class="page">
     ${backBar('#/', '', `<a class="link" href="#/account-edit/${esc(acc.id)}">Edit</a>`)}
     <section class="hero">
       <div class="title-row">${avatar(acc)}<div><h1 class="h-account">${esc(acc.name)}</h1><div class="small muted">${esc(ACCOUNT_KINDS[acc.kind] || '')}</div></div></div>
-      <div class="big-number">${money(bal)}</div>
-      <div class="delta ${signedClass(ch)}">${money(ch, { sign: true })} this month</div>
+      <div class="big-number">${money(bal, cur(acc))}</div>
+      ${countsLine(acc, bal) ? `<div class="small muted">${esc(countsLine(acc, bal))} counts towards your total</div>` : ''}
+      <div class="delta ${signedClass(ch)}">${money(ch, { sign: true, ...cur(acc) })} this month</div>
       ${lineChart(accountSeries(state, acc.id, 6))}
     </section>
     ${status}
@@ -343,6 +364,20 @@ function viewAccount(id) {
       ${txs.length ? groupByDate(txs).map((g) => `<div class="date-head">${esc(dateLabel(g.date))}</div><div class="list">${g.txs.map((x) => txRow(x)).join('')}</div>`).join('') : '<p class="muted">No transactions yet.</p>'}
     </section>
   </main>`;
+}
+
+const SHARES = [[100, 'All of it (100%)'], [50, 'Half (50%), e.g. a joint account'], [33, 'A third (33%)'], [25, 'A quarter (25%)']];
+
+function shareAndCurrencyFields(acc, prefix = '') {
+  const share = acc.share ?? 100;
+  const options = SHARES.some(([v]) => v === share) ? SHARES : [...SHARES, [share, `${share}%`]];
+  return `<label class="field">Currency<select name="${prefix}currency">
+      <option value="EUR" ${currencyOf(acc) === 'EUR' ? 'selected' : ''}>Euro (€)</option>
+      <option value="USD" ${currencyOf(acc) === 'USD' ? 'selected' : ''}>US dollar ($), shown in € in your total</option>
+    </select></label>
+    <label class="field">How much of it is yours<select name="${prefix}share">
+      ${options.map(([v, l]) => `<option value="${v}" ${v === share ? 'selected' : ''}>${esc(l)}</option>`).join('')}
+    </select><span class="hint">Your total and your spending count only your part. The account still shows its full balance, so it matches your bank.</span></label>`;
 }
 
 function viewAccountEdit(id) {
@@ -359,6 +394,7 @@ function viewAccountEdit(id) {
         <select name="fundedFrom"><option value="">The ${esc(acc.name || 'wallet')} balance</option>${banks.map((b) => `<option value="${esc(b.id)}" ${b.id === acc.fundedFrom ? 'selected' : ''}>${esc(b.name)}</option>`).join('')}</select>
         <span class="hint">PayPal often takes payments straight from your bank. Choosing the bank here counts each payment once, in PayPal, and treats the bank debit as a transfer.</span>
       </label>
+      ${shareAndCurrencyFields(acc)}
       ${isNew ? `<label class="field">Current balance (optional)<input name="balance" inputmode="decimal" placeholder="0,00"></label>` : ''}
       <button class="button primary" type="submit">${isNew ? 'Add account' : 'Save'}</button>
       ${isNew ? '' : `<button class="button danger" type="button" data-action="delete-account" data-id="${esc(id)}">Delete account</button>`}
@@ -414,7 +450,7 @@ function viewSpending(p) {
       <div class="section-head"><h2>Last 6 months</h2></div>
       <div class="card">${barChart(monthlySpending(state, 6))}</div>
     </section>
-    <p class="small muted">Transfers between your own accounts, investments and balance corrections aren't counted as spending.</p>
+    <p class="small muted">Transfers between your own accounts, investments and balance corrections aren't counted as spending.${state.accounts.some((a) => shareOf(a) < 1) ? ' Shared accounts count at your share.' : ''}${hasUsd(state) ? ' Dollar amounts are converted to euro.' : ''}</p>
   </main>`;
 }
 
@@ -428,7 +464,7 @@ function viewCategory(id, p) {
     <p class="muted small">${esc(PERIODS[p])}. Change a category here and similar payments will be suggested the same way next time.</p>
     ${txs.length ? `<div class="list">${txs.map((t) => `<div class="row">
       <a class="row-main" href="#/tx/${esc(t.id)}"><span class="row-title">${esc(t.payee || 'No description')}</span><span class="row-sub"><span>${esc(dateLabel(t.date))}</span><span>${esc(accountById(t.accountId)?.name || '')}</span></span></a>
-      <span class="row-end"><span class="amount ${signedClass(t.amount)}">${money(t.amount, { sign: true })}</span>
+      <span class="row-end"><span class="amount ${signedClass(t.amount)}">${money(t.amount, { sign: true, ...cur(accountById(t.accountId)) })}</span>
       <select class="mini-select" data-change="set-category" data-id="${esc(t.id)}" aria-label="Category for ${esc(t.payee)}">${categoryOptions(t.category)}</select></span>
     </div>`).join('')}</div>` : '<p class="muted">Nothing here.</p>'}
   </main>`;
@@ -436,7 +472,7 @@ function viewCategory(id, p) {
 
 // ---------- scanning ----------
 
-function viewScan(accountId) {
+function viewScan(accountId, mode) {
   warmUp();
   const acc = accountId ? accountById(accountId) : null;
   if (scanning) {
@@ -447,26 +483,33 @@ function viewScan(accountId) {
       <p class="small muted">This happens on your phone. The first time can take a little longer while the reader loads.</p>
     </main>`;
   }
+  const picker = (m, icon, title, text) => `<label class="dropzone choice">
+      ${icon}
+      <span class="row-title">${title}</span>
+      <span class="small muted">${text}</span>
+      <input type="file" accept="image/*" multiple data-change="scan-files" data-mode="${m}" data-account="${esc(accountId || '')}" aria-label="${esc(title)}">
+    </label>`;
+  if (acc || mode === 'payments') {
+    return `<main class="page narrow">
+      ${backBar(acc ? `#/account/${esc(acc.id)}` : '#/scan', '')}
+      <h1 class="page-title">Payments${acc ? ` in ${esc(acc.name)}` : ''}</h1>
+      <p class="muted">A screenshot of the list of payments in one account. New ones are added; ones already saved are recognised. It's read on this phone and isn't stored or uploaded.</p>
+      ${picker('payments', icons.list, 'Choose screenshots', 'You can pick several at once for a long list')}
+      <ul class="tips"><li>If the balance is on the same screen, it's used to check nothing is missing.</li><li>You'll check everything before it's saved.</li></ul>
+    </main>`;
+  }
   return `<main class="page narrow">
     <div class="topbar"><h1 class="page-title">Add a screenshot</h1></div>
-    <p class="muted">Take a screenshot of ${acc ? esc(acc.name) : 'an account'} showing the balance or a list of transactions, then choose it here. It's read on this phone and isn't stored or uploaded.</p>
-    <label class="dropzone">
-      ${icons.image}
-      <span class="row-title">Choose screenshots</span>
-      <span class="small muted">You can pick several at once for a long list</span>
-      <input type="file" accept="image/*" multiple data-change="scan-files" data-account="${esc(accountId || '')}">
-    </label>
-    <ul class="tips">
-      <li>Include the balance if you can. It's how the app checks it's not missing anything.</li>
-      <li>Light or dark mode both work. Cropping isn't needed.</li>
-      <li>You'll check everything before it's saved.</li>
-    </ul>
+    <p class="muted">What does your screenshot show? It's read on this phone and isn't stored or uploaded.</p>
+    ${picker('balances', icons.wallet, 'Balances', 'An overview with one or more accounts and their balances. Updates those balances.')}
+    ${picker('payments', icons.list, 'Payments', 'The list of payments in one account. Adds the new ones to that account.')}
+    <p class="small muted">Light or dark mode both work, and cropping isn't needed. You'll check everything before it's saved.</p>
   </main>`;
 }
 
-async function startScan(files, accountId) {
+async function startScan(files, accountId, mode) {
   scanning = { label: 'Loading the reader', progress: 0 };
-  go('#/scan' + (accountId ? `?account=${accountId}` : ''));
+  go('#/scan' + (accountId ? `?account=${accountId}` : `?mode=${mode}`));
   const all = [];
   try {
     for (let i = 0; i < files.length; i++) {
@@ -489,17 +532,133 @@ async function startScan(files, accountId) {
     return;
   }
   scanning = null;
-  draft = buildDraft(parseScreenshot(all, today()), accountId);
+  draft = mode === 'balances' ? buildBalanceDraft(parseBalances(all)) : buildDraft(parseScreenshot(all, today()), accountId);
   go('#/review');
 }
+
+// ---------- balances from an overview screen ----------
+
+function guessKind(label, provider) {
+  if (/depot|portfolio|broker|wertpapier|aktien/i.test(label)) return 'broker';
+  if (/crypto|krypto|bitcoin|spot|wallet/i.test(label)) return provider?.kind === 'wallet' ? 'wallet' : 'crypto';
+  if (/paypal/i.test(label)) return 'wallet';
+  if (/bar|cash/i.test(label)) return 'cash';
+  return provider?.kind || 'bank';
+}
+
+function buildBalanceDraft(parsed) {
+  const seen = {};
+  const used = new Set();
+  const rows = parsed.accounts.map((a) => {
+    const base = a.label.toLowerCase();
+    const n = (seen[base] = (seen[base] ?? -1) + 1);
+    const key = `${base}#${n}`;
+    // Remembered from an earlier screenshot, else an account with the same name.
+    let target = state.accounts.find((x) => !used.has(x.id) && (x.labels || []).includes(key))?.id
+      || state.accounts.find((x) => !used.has(x.id) && !(x.labels || []).length && x.name.toLowerCase() === base)?.id
+      || 'new';
+    if (target !== 'new') used.add(target);
+    const provider = parsed.provider;
+    const name = (provider ? `${provider.name} ` : '') + a.label + (n ? ` ${n + 1}` : '');
+    return { key, label: a.label, amount: a.amount, target, newName: name, newKind: guessKind(a.label, provider), currency: a.currency || 'EUR', share: 100 };
+  });
+  return { mode: 'balances', rows, date: today(), text: parsed.text };
+}
+
+function viewBalanceReview() {
+  const d = draft;
+  const kinds = Object.entries(ACCOUNT_KINDS);
+  const rows = d.rows.map((r, i) => `<div class="card stack" data-bal="${i}">
+    <div class="cat-line"><span class="row-title">${esc(r.label)}</span>
+      <input class="input amount-input" data-bal-field="amount" inputmode="decimal" value="${esc(typedValue(r.amount))}" aria-label="Balance of ${esc(r.label)}"></div>
+    <label class="field">Update<select data-bal-field="target" data-rerender="1">
+      ${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === r.target ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}
+      <option value="new" ${r.target === 'new' ? 'selected' : ''}>New account…</option>
+      <option value="skip" ${r.target === 'skip' ? 'selected' : ''}>Don't track this one</option>
+    </select></label>
+    ${r.target === 'new' ? `<label class="field">Name<input data-bal-field="newName" value="${esc(r.newName)}"></label>
+      <div class="two">
+        <label class="field">Type<select data-bal-field="newKind">${kinds.map(([k, v]) => `<option value="${k}" ${k === r.newKind ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>
+        <label class="field">Currency<select data-bal-field="currency"><option value="EUR" ${r.currency === 'EUR' ? 'selected' : ''}>€</option><option value="USD" ${r.currency === 'USD' ? 'selected' : ''}>$</option></select></label>
+      </div>
+      <label class="field">How much is yours<select data-bal-field="share">${SHARES.map(([v, l]) => `<option value="${v}" ${v === r.share ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>` : ''}
+  </div>`).join('');
+  return `<main class="page">
+    ${backBar('#/scan', 'Check the balances')}
+    <p class="muted">${d.rows.length ? `Found ${d.rows.length} balance${d.rows.length > 1 ? 's' : ''}. Pick which account each one updates; the app remembers it for next time.` : 'No balances were found. Try a sharper screenshot, or use Payments if this is a list of payments.'}</p>
+    ${rows}
+    <label class="field">Balances as of<input type="date" data-draft="date" value="${esc(d.date)}"></label>
+    <details class="raw"><summary>Show the text that was read</summary><pre>${esc(d.text)}</pre></details>
+    ${d.rows.length ? '<div class="sticky-actions"><button class="button primary wide" data-action="save-balances">Update balances</button></div>' : ''}
+  </main>`;
+}
+
+// Stores a balance seen on a screenshot and compares it with the app.
+// Returns 'match', 'value' (an investment's change in value was recorded) or 'open' (a mismatch to fix).
+function isFresh(acc) {
+  return !state.transactions.some((t) => t.accountId === acc.id) && !state.checks.some((c) => c.accountId === acc.id);
+}
+
+function recordBalance(acc, balance, date, { candidates = [], fresh = isFresh(acc), earliest = date } = {}) {
+  const nowIso = new Date().toISOString();
+  if (fresh) {
+    // The first screenshot of an account sets its starting balance.
+    const gap = balance - accountBalance(state, acc.id, date);
+    if (gap) state.transactions.push({ id: uid(), accountId: acc.id, date: addDays(earliest, -1), payee: 'Starting balance', amount: gap, category: 'correction', source: 'opening', createdAt: nowIso });
+  }
+  const check = { id: uid(), accountId: acc.id, date, balance, candidates, status: 'open', createdAt: nowIso };
+  state.checks.push(check);
+  const { diff } = checkDiff(state, check);
+  if (diff === 0) { check.status = 'match'; return { check, status: 'match', diff }; }
+  if (isInvestment(acc) && !candidates.length) {
+    // Investments move with the market; the difference is their change in value.
+    state.transactions.push(correctionTx(state, check));
+    check.status = 'match';
+    return { check, status: 'value', diff };
+  }
+  return { check, status: 'open', diff };
+}
+
+function newAccount(fields) {
+  const acc = { id: uid(), color: ACCOUNT_COLORS[state.accounts.length % ACCOUNT_COLORS.length], createdAt: new Date().toISOString(), currency: 'EUR', share: 100, fundedFrom: null, labels: [], ...fields };
+  state.accounts.push(acc);
+  return acc;
+}
+
+function saveBalances() {
+  const d = draft;
+  const results = [];
+  for (const r of d.rows) {
+    if (r.target === 'skip' || r.amount == null) continue;
+    let acc = r.target === 'new' ? null : accountById(r.target);
+    if (!acc) {
+      if (!r.newName.trim()) { toast('Give each new account a name.'); return; }
+      acc = newAccount({ name: r.newName.trim(), kind: r.newKind, currency: r.currency, share: r.share, fundedFrom: r.newKind === 'wallet' ? state.accounts.find((a) => a.kind === 'bank')?.id || null : null });
+    }
+    // Remember which line of the screen belongs to this account.
+    for (const a of state.accounts) if (a.labels) a.labels = a.labels.filter((k) => k !== r.key);
+    acc.labels = [...(acc.labels || []), r.key];
+    results.push({ acc, ...recordBalance(acc, r.amount, d.date) });
+  }
+  draft = null;
+  commit({ rerender: false });
+  refreshRate();
+  const open = results.filter((x) => x.status === 'open');
+  const ok = results.length - open.length;
+  if (open.length === 1) { go(`#/fix/${open[0].check.id}`); return; }
+  toast(open.length ? `Updated ${ok} balance${ok === 1 ? '' : 's'}. ${open.length} don't match yet.` : `Updated ${results.length} balance${results.length === 1 ? '' : 's'}. Everything matches.`);
+  go('#/');
+}
+
+// ---------- payments in one account ----------
 
 function buildDraft(parsed, accountId) {
   let choice = accountId || '';
   if (!choice && parsed.provider) {
     const p = parsed.provider.name.toLowerCase();
-    choice = state.accounts.find((a) => a.name.toLowerCase().includes(p))?.id || 'new';
+    choice = state.accounts.find((a) => a.name.toLowerCase().includes(p))?.id || '';
   }
-  if (!choice) choice = state.accounts.length === 1 ? state.accounts[0].id : 'new';
+  if (!choice) choice = state.accounts.length ? state.accounts[0].id : 'new';
   // Screenshots of a scrolling list overlap; keep each transaction once.
   const seen = new Set();
   const rows = [];
@@ -509,12 +668,16 @@ function buildDraft(parsed, accountId) {
     seen.add(k);
     rows.push({ ...t, id: uid(), include: true, category: null, paidFromBank: false, existing: false });
   }
+  // A balance "incl. pending" already counts payments dated after today.
+  const latest = rows.reduce((m, r) => (r.date > m ? r.date : m), today());
   const d = {
+    mode: 'payments',
     account: choice,
     newName: parsed.provider?.name || '',
     newKind: parsed.provider?.kind || 'bank',
+    newCurrency: parsed.currency || 'EUR',
     balance: parsed.balance,
-    balanceDate: today(),
+    balanceDate: latest,
     rows,
     text: parsed.text,
   };
@@ -523,8 +686,7 @@ function buildDraft(parsed, accountId) {
 }
 
 function draftAccount(d) {
-  if (d.account === 'new') return { id: null, name: d.newName, kind: d.newKind, fundedFrom: d.newKind === 'wallet' ? state.accounts.find((a) => a.kind === 'bank')?.id || null : null };
-  if (d.account === 'total') return null;
+  if (d.account === 'new') return { id: null, name: d.newName, kind: d.newKind, currency: d.newCurrency, fundedFrom: d.newKind === 'wallet' ? state.accounts.find((a) => a.kind === 'bank')?.id || null : null };
   return accountById(d.account);
 }
 
@@ -544,6 +706,7 @@ function applyAccountToDraft(d) {
 
 function viewReview() {
   if (!draft) return viewScan();
+  if (draft.mode === 'balances') return viewBalanceReview();
   const d = draft;
   const acc = draftAccount(d);
   const bank = acc?.kind === 'wallet' ? (acc.fundedFrom ? accountById(acc.fundedFrom) : null) : null;
@@ -564,27 +727,26 @@ function viewReview() {
     ${r.signGuessed && !r.existing ? '<span class="hint">No + or − on the screenshot, so this is a guess. Add a minus for money going out.</span>' : ''}
   </div>`).join('');
   return `<main class="page">
-    ${backBar('#/scan', 'Check what was read')}
+    ${backBar('#/scan?mode=payments', 'Check what was read')}
     <p class="muted">Read on this phone. Correct anything that's wrong, then save.</p>
-    ${nothing ? '<p class="note">No amounts were found. You can type the balance below, or try a sharper screenshot.</p>' : ''}
+    ${nothing ? '<p class="note">No payments were found. If this screen shows several accounts with balances, go back and choose Balances instead.</p>' : ''}
     <div class="card stack">
       <label class="field">Account<select data-change="draft-account">
         ${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === d.account ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}
         <option value="new" ${d.account === 'new' ? 'selected' : ''}>New account…</option>
-        ${state.accounts.length > 1 ? `<option value="total" ${d.account === 'total' ? 'selected' : ''}>Total of all my accounts</option>` : ''}
       </select></label>
-      ${d.account === 'new' ? `<label class="field">Name<input data-draft="newName" value="${esc(d.newName)}" placeholder="e.g. Sparkasse Giro"></label>
+      ${d.account === 'new' ? `<label class="field">Name<input data-draft="newName" value="${esc(d.newName)}" placeholder="e.g. DKB Girokonto"></label>
         <label class="field">Type<select data-change="draft-kind">${Object.entries(ACCOUNT_KINDS).map(([k, v]) => `<option value="${k}" ${k === d.newKind ? 'selected' : ''}>${esc(v)}</option>`).join('')}</select></label>` : ''}
       <div class="two">
-        <label class="field">Balance on screenshot<input data-draft="balance" inputmode="decimal" value="${d.balance == null ? '' : esc(typedValue(d.balance))}" placeholder="Not shown"></label>
-        <label class="field">On<input type="date" data-draft="balanceDate" value="${esc(d.balanceDate)}"></label>
+        <label class="field">Balance shown (optional)<input data-draft="balance" inputmode="decimal" value="${d.balance == null ? '' : esc(typedValue(d.balance))}" placeholder="Not shown"></label>
+        <label class="field">As of<input type="date" data-draft="balanceDate" value="${esc(d.balanceDate)}"></label>
       </div>
     </div>
-    ${d.account === 'total' ? '<p class="note">This compares the screenshot with the total of all your accounts in the app.</p>' : `<section>
-      <div class="section-head"><h2>${d.rows.length ? `${d.rows.length} transaction${d.rows.length > 1 ? 's' : ''} found${d.rows.length !== newCount ? `, ${newCount} new` : ''}` : 'Transactions'}</h2></div>
+    <section>
+      <div class="section-head"><h2>${d.rows.length ? `${d.rows.length} payment${d.rows.length > 1 ? 's' : ''} found${d.rows.length !== newCount ? `, ${newCount} new` : ''}` : 'Payments'}</h2></div>
       ${rows}
       <button class="button plain" data-action="draft-add-row">${icons.plus}<span>Add a line that was missed</span></button>
-    </section>`}
+    </section>
     <details class="raw"><summary>Show the text that was read</summary><pre>${esc(d.text)}</pre></details>
     <div class="sticky-actions"><button class="button primary wide" data-action="save-draft">Save</button></div>
   </main>`;
@@ -594,25 +756,13 @@ function saveDraft() {
   const d = draft;
   const nowIso = new Date().toISOString();
   if (d.account === 'new' && !d.newName.trim()) { toast('Give the new account a name.'); return; }
-  if (d.account === 'total') {
-    if (d.balance == null) { toast('Type the total shown on the screenshot.'); return; }
-    const check = { id: uid(), accountId: null, date: d.balanceDate, balance: d.balance, candidates: [], status: 'open', createdAt: nowIso };
-    check.status = checkDiff(state, check).diff === 0 ? 'match' : 'open';
-    state.checks.push(check);
-    draft = null;
-    commit({ rerender: false });
-    if (check.status === 'open') go(`#/fix/${check.id}`);
-    else { toast('Your total matches the screenshot.'); go('#/'); }
-    return;
-  }
   let acc = d.account === 'new' ? null : accountById(d.account);
   if (!acc) {
     const tmpl = draftAccount(d);
-    acc = { id: uid(), name: d.newName.trim(), kind: d.newKind, color: ACCOUNT_COLORS[state.accounts.length % ACCOUNT_COLORS.length], fundedFrom: tmpl.fundedFrom, createdAt: nowIso };
-    state.accounts.push(acc);
+    acc = newAccount({ name: d.newName.trim(), kind: d.newKind, currency: d.newCurrency, fundedFrom: tmpl.fundedFrom });
   }
-  const firstTime = !state.transactions.some((t) => t.accountId === acc.id);
   const bank = fundingBank(acc);
+  const fresh = isFresh(acc);
   const saved = [];
   for (const r of d.rows) {
     if (!r.include || r.amount === 0) continue;
@@ -622,32 +772,15 @@ function saveDraft() {
     saved.push(tx);
     if (r.category && r.categoryTouched) learn(state.rules, tx.payee, r.category);
   }
-  let message = saved.length ? `Saved ${saved.length} transaction${saved.length === 1 ? '' : 's'}.` : '';
+  let message = saved.length ? `Saved ${saved.length} payment${saved.length === 1 ? '' : 's'}.` : '';
   let goTo = `#/account/${acc.id}`;
   if (d.balance != null) {
-    if (firstTime) {
-      // The first screenshot of an account sets its starting balance.
-      const gap = d.balance - accountBalance(state, acc.id, d.balanceDate);
-      if (gap) {
-        const earliest = saved.reduce((m, t) => (t.date < m ? t.date : m), d.balanceDate);
-        state.transactions.push({ id: uid(), accountId: acc.id, date: addDays(earliest, -1), payee: 'Starting balance', amount: gap, category: 'correction', source: 'opening', createdAt: nowIso });
-      }
-    }
     const candidates = d.rows.filter((r) => !r.include && !r.existing && r.amount).map((r) => ({ id: r.id, payee: r.payee, amount: r.amount, date: r.date, category: r.category || null }));
-    const check = { id: uid(), accountId: acc.id, date: d.balanceDate, balance: d.balance, candidates, status: 'open', createdAt: nowIso };
-    const { diff } = checkDiff(state, check);
-    if (diff === 0) {
-      check.status = 'match';
-      message = `${message} ${acc.name} matches the screenshot.`.trim();
-    } else if (isInvestment(acc) && !candidates.length) {
-      // Investments move with the market; the difference is their change in value.
-      state.transactions.push(correctionTx(state, check));
-      check.status = 'match';
-      message = `Updated ${acc.name}: value changed by ${money(diff, { sign: true })}.`;
-    } else {
-      goTo = `#/fix/${check.id}`;
-    }
-    state.checks.push(check);
+    const earliest = saved.reduce((m, t) => (t.date < m ? t.date : m), d.balanceDate);
+    const res = recordBalance(acc, d.balance, d.balanceDate, { candidates, fresh, earliest });
+    if (res.status === 'match') message = `${message} ${acc.name} matches the screenshot.`.trim();
+    else if (res.status === 'value') message = `Updated ${acc.name}: value changed by ${money(res.diff, { sign: true, ...cur(acc) })}.`;
+    else goTo = `#/fix/${res.check.id}`;
   }
   draft = null;
   commit({ rerender: false });
@@ -664,6 +797,7 @@ function viewFix(id) {
   const back = acc ? `#/account/${acc.id}` : '#/';
   const name = acc ? acc.name : 'Your total';
   const { app, diff } = checkDiff(state, check);
+  const c = cur(acc), c0 = c;
   if (check.status !== 'open') {
     return `<main class="page narrow">${backBar(back)}
       <section class="empty"><div class="empty-icon ok">${icons.check}</div><h1>${esc(name)} matches</h1>
@@ -672,13 +806,13 @@ function viewFix(id) {
   }
   const ideas = fixSuggestions(state, check).map((s) => {
     const t = s.tx || s.candidate;
-    const what = t ? `${esc(t.payee)} (${money(t.amount, { sign: true })}, ${esc(dateLabel(t.date))})` : '';
+    const what = t ? `${esc(t.payee)} (${money(t.amount, { sign: true, ...c })}, ${esc(dateLabel(t.date))})` : '';
     const card = (text, label, action, data = '') => `<div class="suggestion"><p>${text}</p><button class="button primary small" data-action="${action}" data-check="${esc(check.id)}" ${data}>${label}</button></div>`;
     switch (s.type) {
       case 'add': return card(`This transaction was on the screenshot but wasn't saved: ${what}.`, 'Add it', 'fix-add', `data-ids="${esc(t.id)}"`);
-      case 'add-two': return card(`These two weren't saved and add up to the difference: ${s.candidates.map((c) => `${esc(c.payee)} (${money(c.amount, { sign: true })})`).join(' and ')}.`, 'Add both', 'fix-add', `data-ids="${esc(s.candidates.map((c) => c.id).join(','))}"`);
+      case 'add-two': return card(`These two weren't saved and add up to the difference: ${s.candidates.map((c) => `${esc(c.payee)} (${money(c.amount, { sign: true, ...c0 })})`).join(' and ')}.`, 'Add both', 'fix-add', `data-ids="${esc(s.candidates.map((c) => c.id).join(','))}"`);
       case 'duplicate': return card(`${what} looks like it was saved twice.`, 'Remove the copy', 'fix-remove', `data-tx="${esc(t.id)}"`);
-      case 'flip': return card(`${what} might have been saved the wrong way round.`, money(-t.amount, { sign: true }) + ' instead', 'fix-flip', `data-tx="${esc(t.id)}"`);
+      case 'flip': return card(`${what} might have been saved the wrong way round.`, money(-t.amount, { sign: true, ...c }) + ' instead', 'fix-flip', `data-tx="${esc(t.id)}"`);
       case 'paid-from-balance': return card(`${what} is marked as paid from your bank. If it was paid from the ${esc(name)} balance, everything matches.`, 'Paid from balance', 'fix-funding', `data-tx="${esc(t.id)}" data-to=""`);
       case 'paid-from-bank': return card(`${what} might have been paid from ${esc(fundingBank(acc)?.name || 'your bank')} rather than the ${esc(name)} balance.`, 'Paid from bank', 'fix-funding', `data-tx="${esc(t.id)}" data-to="${esc(acc.fundedFrom)}"`);
       default: return '';
@@ -686,22 +820,22 @@ function viewFix(id) {
   }).join('');
   const investment = isInvestment(acc);
   const accountsList = !acc ? `<section><div class="section-head"><h2>Accounts</h2></div><p class="small muted">Accounts without a recent screenshot are the usual cause. Adding one for each usually finds it.</p>
-    <div class="list">${state.accounts.map((a) => `<a class="row" href="#/scan?account=${esc(a.id)}">${avatar(a)}<span class="row-main"><span class="row-title">${esc(a.name)}</span><span class="row-sub">${statusLine(a)}</span></span><span class="row-end"><span class="amount">${money(accountBalance(state, a.id, check.date))}</span></span></a>`).join('')}</div></section>` : '';
+    <div class="list">${state.accounts.map((a) => `<a class="row" href="#/scan?account=${esc(a.id)}">${avatar(a)}<span class="row-main"><span class="row-title">${esc(a.name)}</span><span class="row-sub">${statusLine(a)}</span></span><span class="row-end"><span class="amount">${money(accountBalance(state, a.id, check.date), cur(a))}</span></span></a>`).join('')}</div></section>` : '';
   return `<main class="page">
     ${backBar(back)}
     <h1>${esc(name)} doesn't match</h1>
     <div class="card compare">
-      <div><span class="muted">Screenshot, ${esc(dateLabel(check.date))}</span><span class="amount">${money(check.balance)}</span></div>
-      <div><span class="muted">In the app</span><span class="amount">${money(app)}</span></div>
-      <div class="total"><span>Difference</span><span class="amount warn-text">${money(diff, { sign: true })}</span></div>
+      <div><span class="muted">Screenshot, ${esc(dateLabel(check.date))}</span><span class="amount">${money(check.balance, c)}</span></div>
+      <div><span class="muted">In the app</span><span class="amount">${money(app, c)}</span></div>
+      <div class="total"><span>Difference</span><span class="amount warn-text">${money(diff, { sign: true, ...c })}</span></div>
     </div>
     ${ideas ? `<section><div class="section-head"><h2>Likely cause</h2></div>${ideas}</section>` : ''}
     ${accountsList}
     <section class="stack">
       ${acc ? `<a class="button secondary wide" href="#/tx/new?account=${esc(acc.id)}&amount=${diff}&check=${esc(check.id)}">Add a missing transaction</a>
       <a class="button secondary wide" href="#/scan?account=${esc(acc.id)}">Add another screenshot</a>
-      <button class="button secondary wide" data-action="fix-correct" data-check="${esc(check.id)}">${investment ? 'Record as a change in value' : `Set the balance to ${money(check.balance)}`}</button>
-      <p class="hint">${investment ? 'For investments the difference is usually the market moving. It is recorded as a value change, not as spending.' : `Adds a correction of ${money(diff, { sign: true })} that isn't counted as spending. Use it when you can't find the cause.`}</p>` : ''}
+      <button class="button secondary wide" data-action="fix-correct" data-check="${esc(check.id)}">${investment ? 'Record as a change in value' : `Set the balance to ${money(check.balance, c)}`}</button>
+      <p class="hint">${investment ? 'For investments the difference is usually the market moving. It is recorded as a value change, not as spending.' : `Adds a correction of ${money(diff, { sign: true, ...c })} that isn't counted as spending. Use it when you can't find the cause.`}</p>` : ''}
       <button class="button plain wide" data-action="fix-ignore" data-check="${esc(check.id)}">Ignore this time</button>
     </section>
   </main>`;
@@ -746,16 +880,130 @@ function viewTx(id, q) {
   </main>`;
 }
 
+// ---------- plan: costs that come back, and when ----------
+
+function viewPlan() {
+  const timeline = planTimeline(state, 12);
+  const reserve = monthlyReserve(state);
+  const found = recurringPayments(state);
+  const year = timeline.reduce((s, m) => s + m.items.filter((x) => x.plan.amount < 0).reduce((a, x) => a - x.plan.amount, 0), 0);
+  const months = timeline.filter((m) => m.items.length);
+  return `<main class="page">
+    <div class="topbar"><h1 class="page-title">Plan</h1><span class="topbar-extra"><a class="link" href="#/plan-edit/new">${icons.plus}<span>Add</span></a></span></div>
+    ${state.plans.length ? `<div class="cards">
+      <div class="card"><div class="label">Next 12 months</div><div class="mid-number">${money(year)}</div><div class="small muted">planned costs</div></div>
+      <div class="card"><div class="label">Put aside monthly</div><div class="mid-number">${money(reserve)}</div><div class="small muted">covers the yearly ones</div></div>
+    </div>` : `<section class="empty">
+      <div class="empty-icon">${icons.calendar}</div>
+      <h1>Plan ahead</h1>
+      <p class="muted">Add costs that come back, like car insurance, rent or subscriptions, with the month they're taken. You'll see what's due when and how much to put aside.</p>
+      <a class="button primary" href="#/plan-edit/new">Add a planned payment</a>
+    </section>`}
+    ${months.map((m) => `<section>
+      <div class="section-head"><h2>${esc(monthLabel(m.month))}</h2><span class="small muted">${money(m.total, { sign: true })}</span></div>
+      <div class="list">${m.items.map((x) => {
+        const acc = x.plan.accountId ? accountById(x.plan.accountId) : null;
+        return `<a class="row" href="#/plan-edit/${esc(x.plan.id)}">
+          <span class="row-main"><span class="row-title">${esc(x.plan.name)}</span><span class="row-sub"><span>${esc(dateLabel(x.date))}</span><span>${esc(FREQUENCIES[x.plan.frequency]?.label || '')}</span>${acc ? `<span>${esc(acc.name)}</span>` : ''}</span></span>
+          <span class="row-end"><span class="amount ${signedClass(x.plan.amount)}">${money(x.plan.amount, { sign: true })}</span></span>
+        </a>`;
+      }).join('')}</div>
+    </section>`).join('')}
+    ${found.length ? `<section>
+      <div class="section-head"><h2>Found in your payments</h2></div>
+      <p class="small muted">These come back regularly. Add them to see them in your plan.</p>
+      <div class="list">${found.map((r, i) => `<div class="row">
+        <span class="row-main"><span class="row-title">${esc(r.payee)}</span><span class="row-sub"><span>${esc(FREQUENCIES[r.frequency].label)}</span><span>next ${esc(dateLabel(r.next))}</span></span></span>
+        <span class="row-end"><span class="amount">${money(-r.amount, { sign: true, ...cur(accountById(r.accountId)) })}</span><button class="button plain small" data-action="add-recurring" data-i="${i}">Add</button></span>
+      </div>`).join('')}</div>
+    </section>` : ''}
+  </main>`;
+}
+
+function viewPlanEdit(id, q) {
+  const isNew = id === 'new';
+  const p = isNew ? { name: '', amount: -0, frequency: 'yearly', due: addMonths(today(), 1), accountId: '', category: null, note: '' } : state.plans.find((x) => x.id === id);
+  if (!p) return viewNotFound();
+  const out = !(p.amount > 0);
+  return `<main class="page">
+    ${backBar('#/plan', isNew ? 'Planned payment' : p.name)}
+    <form data-form="plan" data-id="${esc(id)}" class="stack">
+      <label class="field">What is it<input name="name" value="${esc(p.name)}" placeholder="e.g. Car insurance" required ${isNew ? 'autofocus' : ''}></label>
+      <div class="segmented" role="radiogroup" aria-label="Direction">
+        <label><input type="radio" name="dir" value="out" ${out ? 'checked' : ''}><span>Money out</span></label>
+        <label><input type="radio" name="dir" value="in" ${!out ? 'checked' : ''}><span>Money in</span></label>
+      </div>
+      <div class="two">
+        <label class="field">Amount<input name="amount" inputmode="decimal" value="${p.amount ? esc(typedValue(Math.abs(p.amount))) : ''}" placeholder="0,00" required></label>
+        <label class="field">How often<select name="frequency">${Object.entries(FREQUENCIES).map(([k, f]) => `<option value="${k}" ${k === p.frequency ? 'selected' : ''}>${esc(f.label)}</option>`).join('')}</select></label>
+      </div>
+      <label class="field">Next time it's due<input type="date" name="due" value="${esc(p.due)}" required><span class="hint">For yearly costs, the month and day it's usually taken.</span></label>
+      <label class="field">From account (optional)<select name="accountId"><option value="">Not set</option>${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === p.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
+      <label class="field">Category<select name="category">${categoryOptions(p.category)}</select></label>
+      <label class="field">Note<input name="note" value="${esc(p.note || '')}" placeholder="Optional, e.g. contract number"></label>
+      <button class="button primary" type="submit">${isNew ? 'Add to plan' : 'Save'}</button>
+      ${isNew ? '' : `<button class="button danger" type="button" data-action="delete-plan" data-id="${esc(id)}">Delete</button>`}
+    </form>
+  </main>`;
+}
+
+// ---------- exchange rate ----------
+
+// Asks the European Central Bank's published rate (via frankfurter.app) for USD to EUR. Only the
+// currency pair is requested; nothing about you or your money is sent.
+async function fetchRate() {
+  const urls = ['https://api.frankfurter.app/latest?from=USD&to=EUR', 'https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR'];
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { referrerPolicy: 'no-referrer', credentials: 'omit' });
+      if (!res.ok) continue;
+      const json = await res.json();
+      const rate = Number(json.rates?.EUR);
+      if (rate > 0.3 && rate < 3) return { rate, date: json.date };
+    } catch { /* offline or blocked: try the next one */ }
+  }
+  return null;
+}
+
+let rateFetching = false;
+async function refreshRate(force = false) {
+  if (!state || rateFetching || !hasUsd(state)) return;
+  if (!force && (state.settings.autoRate === false || state.settings.rateChecked === today())) return;
+  rateFetching = true;
+  const r = await fetchRate();
+  rateFetching = false;
+  if (!state) return;
+  if (r) {
+    state.settings.usdRate = r.rate;
+    state.settings.rateDate = r.date;
+    state.settings.rateChecked = today();
+    commit({ rerender: route().parts[0] !== 'review' });
+    if (force) toast(`1 $ = ${r.rate.toFixed(4)} € (ECB, ${dateLabel(r.date)})`);
+  } else if (force) {
+    toast("Couldn't get the rate right now. You can type it instead.");
+  }
+}
+
 // ---------- settings ----------
 
 function viewSettings() {
   return `<main class="page">
-    ${backBar('#/', 'Settings')}
+    <div class="topbar"><h1 class="page-title">More</h1></div>
     <section>
       <div class="list">
+        <button class="row row-button" data-action="lock"><span class="row-main"><span class="row-title">Lock now</span></span>${icons.lock}</button>
         <a class="row" href="#/categories"><span class="row-main"><span class="row-title">Categories</span><span class="row-sub">${state.categories.length} categories</span></span>${icons.chevron}</a>
       </div>
     </section>
+    ${hasUsd(state) ? `<section>
+      <div class="section-head"><h2>Dollar rate</h2></div>
+      <p class="small muted">Your dollar accounts count in your total at this rate.${state.settings.rateDate ? ` ECB rate from ${esc(dateLabel(state.settings.rateDate))}.` : ' Not updated yet.'}</p>
+      <form data-form="rate" class="stack">
+        <label class="field">1 $ in €<input name="rate" inputmode="decimal" value="${esc(String(usdRate(state)).replace('.', ','))}"></label>
+        <label class="inline-check"><input type="checkbox" name="auto" ${state.settings.autoRate === false ? '' : 'checked'}>Update once a day from the ECB (only asks for the rate; nothing about you is sent)</label>
+        <div class="button-row"><button class="button secondary" type="submit">Save</button><button class="button plain" type="button" data-action="update-rate">Update now</button></div>
+      </form>
+    </section>` : ''}
     <section>
       <div class="section-head"><h2>Backup</h2></div>
       <p class="small muted">Your data only exists on this phone. A backup file lets you restore it if the phone is lost or the app is removed. The file is encrypted with your passcode.</p>
@@ -774,7 +1022,7 @@ function viewSettings() {
     </section>
     <section>
       <div class="section-head"><h2>Privacy</h2></div>
-      <p class="small muted">Everything is stored encrypted on this phone and the app locks itself after 3 minutes in the background. Screenshots are read on the phone, then discarded; they're never stored or uploaded. The app works offline.</p>
+      <p class="small muted">Everything is stored encrypted on this phone and the app locks itself after 3 minutes in the background. Screenshots are read on the phone, then discarded; they're never stored or uploaded. The app works offline. The only thing it ever asks the internet for is the dollar rate, if you have a dollar account.</p>
     </section>
     <section>
       <button class="button danger wide" data-action="wipe">Delete all data</button>
@@ -833,6 +1081,7 @@ const forms = {
     state = { ...emptyState(), ...s };
     unlockError = '';
     render();
+    refreshRate();
   },
   async 'restore-setup'(f) {
     const s = await store.readBackup(restoreText, f.get('pass')).catch(() => undefined);
@@ -852,15 +1101,18 @@ const forms = {
     if (!name) return;
     const kind = f.get('kind');
     const fundedFrom = kind === 'wallet' ? f.get('fundedFrom') || null : null;
+    const currency = f.get('currency') || 'EUR';
+    const share = Number(f.get('share')) || 100;
     if (id === 'new') {
-      const acc = { id: uid(), name, kind, fundedFrom, color: ACCOUNT_COLORS[state.accounts.length % ACCOUNT_COLORS.length], createdAt: new Date().toISOString() };
+      const acc = { id: uid(), name, kind, fundedFrom, currency, share, color: ACCOUNT_COLORS[state.accounts.length % ACCOUNT_COLORS.length], createdAt: new Date().toISOString() };
       state.accounts.push(acc);
       const bal = parseTyped(f.get('balance'));
       if (bal) state.transactions.push({ id: uid(), accountId: acc.id, date: today(), payee: 'Starting balance', amount: bal, category: 'correction', source: 'opening', createdAt: new Date().toISOString() });
       commit({ rerender: false });
       go(`#/account/${acc.id}`);
     } else {
-      Object.assign(accountById(id), { name, kind, fundedFrom });
+      Object.assign(accountById(id), { name, kind, fundedFrom, currency, share });
+      refreshRate();
       commit({ rerender: false });
       go(`#/account/${id}`);
     }
@@ -902,6 +1154,33 @@ const forms = {
     form.reset();
     toast('Passcode changed. Older backups still open with the old passcode.');
   },
+  plan(f, form) {
+    const id = form.dataset.id;
+    const value = parseTyped(f.get('amount'));
+    if (!value) { toast('Enter an amount.'); return; }
+    const fields = {
+      name: f.get('name').trim(),
+      amount: f.get('dir') === 'out' ? -Math.abs(value) : Math.abs(value),
+      frequency: f.get('frequency'),
+      due: f.get('due'),
+      accountId: f.get('accountId') || null,
+      category: f.get('category') || null,
+      note: f.get('note').trim(),
+    };
+    if (id === 'new') state.plans.push({ id: uid(), createdAt: new Date().toISOString(), ...fields });
+    else Object.assign(state.plans.find((x) => x.id === id), fields);
+    commit({ rerender: false });
+    go('#/plan');
+  },
+  rate(f) {
+    const rate = Number(String(f.get('rate')).replace(',', '.'));
+    if (!(rate > 0.3 && rate < 3)) { toast('Enter a rate like 0,86.'); return; }
+    state.settings.usdRate = rate;
+    state.settings.rateDate = null;
+    state.settings.autoRate = Boolean(f.get('auto'));
+    commit();
+    toast('Rate saved.');
+  },
   category(f, form) {
     const name = f.get('name').trim();
     if (!name) return;
@@ -942,6 +1221,21 @@ const actions = {
     $app.querySelector(`[data-row="${draft.rows.length - 1}"] .payee`)?.focus();
   },
   'save-draft': saveDraft,
+  'save-balances': saveBalances,
+  'update-rate'() { refreshRate(true); },
+  'add-recurring'(el) {
+    const r = recurringPayments(state)[Number(el.dataset.i)];
+    if (!r) return;
+    state.plans.push({ id: uid(), name: r.payee, amount: r.amount, frequency: r.frequency, due: r.next, accountId: r.accountId, category: r.category || null, note: '', createdAt: new Date().toISOString() });
+    toast(`${r.payee} added to your plan.`);
+    commit();
+  },
+  'delete-plan'(el) {
+    if (!confirm('Delete this planned payment?')) return;
+    state.plans = state.plans.filter((x) => x.id !== el.dataset.id);
+    commit({ rerender: false });
+    go('#/plan');
+  },
   'fix-add'(el) {
     const check = fixedCheck(el.dataset.check);
     const ids = new Set(el.dataset.ids.split(','));
@@ -1052,7 +1346,7 @@ const changes = {
   },
   'scan-files'(el) {
     const files = [...el.files];
-    if (files.length) startScan(files, el.dataset.account || null);
+    if (files.length) startScan(files, el.dataset.account || null, el.dataset.mode || 'payments');
   },
   'draft-account'(el) {
     draft.account = el.value;
@@ -1089,6 +1383,15 @@ function updateDraftField(el) {
   const key = el.dataset.draft;
   if (key === 'balance') draft.balance = el.value.trim() ? parseTyped(el.value) : null;
   else draft[key] = el.value;
+}
+
+function updateBalanceRow(el) {
+  const r = draft.rows[Number(el.closest('[data-bal]').dataset.bal)];
+  const field = el.dataset.balField;
+  if (field === 'amount') r.amount = parseTyped(el.value);
+  else if (field === 'share') r.share = Number(el.value);
+  else r[field] = el.value;
+  if (el.dataset.rerender) render();
 }
 
 function updateDraftRow(el) {
@@ -1132,12 +1435,14 @@ document.addEventListener('change', (e) => {
   if (el.dataset.change) changes[el.dataset.change]?.(el);
   if (el.dataset.rowField) updateDraftRow(el);
   if (el.dataset.draft) updateDraftField(el);
+  if (el.dataset.balField) updateBalanceRow(el);
 });
 
 document.addEventListener('input', (e) => {
   const el = e.target;
   if (el.dataset.rowField && el.type !== 'checkbox') updateDraftRow(el);
   if (el.dataset.draft) updateDraftField(el);
+  if (el.dataset.balField && el.tagName === 'INPUT') updateBalanceRow(el);
   if (el.dataset.input === 'payee-suggest') {
     const sel = el.form.querySelector('[name=category]');
     if (sel.dataset.touched) return;

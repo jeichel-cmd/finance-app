@@ -27,6 +27,8 @@ export const PROVIDERS = [
 
 const BALANCE_WORDS = /(kontostand|saldo|guthaben|verf[uü]gbar|gesamtwert|gesamtverm|verm[oö]gen|portfolio|depotwert|depot|balance|available|total|gesamt|net\s?worth|estimated|equity|wert)/i;
 const INCOMING_WORDS = /(gutschrift|eingang|erhalten|received|refund|erstattung|r[uü]ckzahlung|gehalt|lohn|salary|deposit|einzahlung|zinsen|interest|dividend|cashback|received from|money from)/i;
+const SECTION_WORDS = /^(future bookings|vorgemerkt[\p{L} ]*|ums[aä]tze|transactions|recent activity|aktivit[aä]t(en)?|letzte[\p{L} ]*|today|heute|yesterday|gestern|this week|diese woche|pending|ausstehend|booked|gebucht|details?)$/iu;
+const NAV_WORDS = /^(home|start|startseite|übersicht|overview|konten|accounts|my accounts|meine konten|dashboard|finanzen|banking|personalize|personalisieren|more|mehr|transfer|überweisen|details?)$/i;
 const NOISE_WORDS = /(limit|kreditrahmen|dispo|p\.\s?a\.|rendite|performance|%)/i;
 
 const MONTHS = {
@@ -109,9 +111,15 @@ export function numberToCents(raw) {
   return { cents: Number(digits) * 100 + Number(frac.padEnd(2, '0') || 0), decimals: frac.length };
 }
 
-const AMOUNT_RE = /([+\-−–]\s?)?(€|EUR)?\s?([+\-−–]\s?)?(\d[\d.,'’]*(?:\s\d{3})*(?:[.,]\d{1,2})?)\s?(€|EUR|[A-Za-z]{3,5}\b|%)?/g;
+const AMOUNT_RE = /([+\-−–]\s?)?(€|EUR|US\$|\$|USD)?\s?([+\-−–]\s?)?(\d[\d.,'’]*(?:\s\d{3})*(?:[.,]\d{1,2})?)\s?(€|EUR|USD|\$|[A-Za-z]{3,5}\b|%)?/g;
 
-// Finds euro amounts in a line. Returns [{ cents, signed, start, end }].
+function currencyOf(symbol) {
+  if (!symbol) return null;
+  return /€|EUR/i.test(symbol) ? 'EUR' : /\$|USD/i.test(symbol) ? 'USD' : 'other';
+}
+
+// Finds euro and dollar amounts in a line. Returns [{ cents, signed, currency, start, end }];
+// currency is null when the screen shows no symbol.
 export function findAmounts(line) {
   const out = [];
   AMOUNT_RE.lastIndex = 0;
@@ -124,14 +132,14 @@ export function findAmounts(line) {
     if (before && /[\p{L}\d:]/u.test(before)) continue;
     const after = line.slice(m.index + all.length);
     if (/^\s?[:/]\d/.test(after)) continue;
-    const euro = cur1 || (cur2 && /^(€|EUR)$/i.test(cur2));
-    if (cur2 && !euro) continue; // %, BTC, USD, shares...
+    const currency = currencyOf(cur1) || currencyOf(cur2);
+    if (currency === 'other') continue; // %, BTC, shares...
     const parsed = numberToCents(num.trim());
     if (!parsed) continue;
-    if (!euro && parsed.decimals !== 2) continue;
+    if (!currency && parsed.decimals !== 2) continue;
     const sign = (sign1 || sign2 || '').trim();
     const cents = /[-−–]/.test(sign) ? -parsed.cents : parsed.cents;
-    out.push({ cents, signed: Boolean(sign), start, end: m.index + all.length });
+    out.push({ cents, signed: Boolean(sign), currency, start, end: m.index + all.length });
   }
   return out;
 }
@@ -186,7 +194,7 @@ export function parseScreenshot(lines, ref) {
     .map((l) => ({ text: String(l.text || '').replace(/\s+/g, ' ').trim(), height: l.height || 0 }))
     .filter((l) => l.text);
   const fullText = rows.map((r) => r.text).join('\n');
-  const provider = detectProvider(fullText);
+  const provider = detectProvider(rows.slice(0, 4).map((r) => r.text).join('\n'));
 
   // Work out every row's date, amounts and remaining text.
   for (const r of rows) {
@@ -213,7 +221,8 @@ export function parseScreenshot(lines, ref) {
     const tallest = rows.filter((r) => r.amounts.length && letters(r.rest) <= 3).sort((a, b) => b.height - a.height)[0];
     if (tallest && median && tallest.height >= median * 1.6) balanceRow = tallest;
   }
-  const balance = balanceRow ? Math.abs(balanceRow.amounts[balanceRow.amounts.length - 1].cents) : null;
+  const balanceAmount = balanceRow ? balanceRow.amounts[balanceRow.amounts.length - 1] : null;
+  const balance = balanceAmount ? balanceAmount.cents : null;
 
   // Transactions: rows with one amount and a payee on the row or just above it.
   // Some apps put a date heading above a group of transactions, others a date caption below each one.
@@ -231,19 +240,55 @@ export function parseScreenshot(lines, ref) {
       continue;
     }
     if (NOISE_WORDS.test(r.text)) continue;
-    let payee = r.rest;
-    if (letters(payee) < 2) {
-      const prev = rows[i - 1];
-      if (prev && !prev.amounts.length && prev !== balanceRow && letters(prev.rest) >= 2 && !BALANCE_WORDS.test(prev.text)) payee = prev.rest;
-      else continue;
+    // A payee can wrap onto the lines above the amount ("SumUp *Cafe am Wolfen" / "Biberach an DE  -12,00").
+    const parts = letters(r.rest) >= 2 ? [r.rest] : [];
+    for (let j = i - 1; j >= 0 && j >= i - 2 && parts.length < 2; j--) {
+      const p = rows[j];
+      if (p.amounts.length || p === balanceRow || isDateOnly(p) || BALANCE_WORDS.test(p.text) || SECTION_WORDS.test(p.rest) || NAV_WORDS.test(p.rest)) break;
+      if (letters(p.rest) < 2) continue;
+      parts.unshift(p.rest);
     }
-    const next = rows[i + 1];
-    const date = r.date || (captionsBelow ? (next && isDateOnly(next) ? next.date : null) : currentDate);
+    if (!parts.length) continue;
+    const payee = parts.join(' ');
+    let captionDate = null;
+    for (let j = i + 1; captionsBelow && j <= i + 3 && j < rows.length && !rows[j].amounts.length; j++) {
+      if (isDateOnly(rows[j])) { captionDate = rows[j].date; break; }
+    }
+    const date = r.date || (captionsBelow ? captionDate : currentDate);
     const a = r.amounts[r.amounts.length - 1];
     let amount = a.cents;
     if (!a.signed) amount = INCOMING_WORDS.test(r.text) ? Math.abs(amount) : -Math.abs(amount);
-    transactions.push({ payee, amount, date: date || ref, dateGuessed: !date, signGuessed: !a.signed });
+    transactions.push({ payee, amount, currency: a.currency, date: date || ref, dateGuessed: !date, signGuessed: !a.signed });
   }
 
-  return { provider, balance, transactions, text: fullText };
+  const currency = balanceAmount?.currency || transactions.find((t) => t.currency)?.currency || null;
+  return { provider, balance, currency, transactions, text: fullText };
+}
+
+// An overview screen listing several accounts, each with its balance ("Girokonto  1.597,63 €").
+// Returns { provider, accounts: [{ label, amount, currency }], text }.
+export function parseBalances(lines) {
+  const rows = lines
+    .map((l) => ({ text: String(l.text || '').replace(/\s+/g, ' ').trim(), height: l.height || 0 }))
+    .filter((l) => l.text);
+  const accounts = [];
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const amounts = findAmounts(r.text);
+    if (!amounts.length) continue;
+    let rest = r.text;
+    for (const a of [...amounts].reverse()) rest = rest.slice(0, a.start) + ' ' + rest.slice(a.end);
+    let label = cleanPayee(rest.replace(/\d{1,2}:\d{2}/g, ' '));
+    if (letters(label) < 3) {
+      const prev = rows[i - 1];
+      const prevLabel = prev && !findAmounts(prev.text).length ? cleanPayee(prev.text) : '';
+      if (letters(prevLabel) < 3 || NAV_WORDS.test(prevLabel) || SECTION_WORDS.test(prevLabel)) continue;
+      label = prevLabel;
+    }
+    if (NAV_WORDS.test(label) || NOISE_WORDS.test(r.text)) continue;
+    const a = amounts[amounts.length - 1];
+    accounts.push({ label, amount: a.cents, currency: a.currency });
+  }
+  const fullText = rows.map((r) => r.text).join('\n');
+  return { provider: detectProvider(fullText), accounts, text: fullText };
 }

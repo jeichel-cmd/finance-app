@@ -6,6 +6,9 @@
 // PayPal: a payment PayPal takes from a bank account carries `paidFrom` (that bank account's id).
 // It counts as spending once, but does not change the PayPal balance. The matching bank debit is
 // categorised as a transfer between own accounts, so it is not counted a second time.
+//
+// Shared accounts (e.g. a joint account) have a `share` in percent: totals and spending count only
+// that part. Accounts can be in EUR or USD; totals are in EUR at the stored USD rate.
 
 import { DEFAULT_CATEGORIES, normalizePayee, suggestCategory, isPayPalPayee } from './categorize.js';
 import { today, addDays, addMonths, monthStart, monthEnd, daysBetween, uid } from './format.js';
@@ -20,8 +23,36 @@ export function emptyState() {
     checks: [],
     categories: DEFAULT_CATEGORIES.map((c) => ({ ...c })),
     rules: {},
+    plans: [],
     settings: {},
   };
+}
+
+export const DEFAULT_USD_RATE = 0.86; // EUR per USD, only until the first update
+
+export function currencyOf(acc) {
+  return acc?.currency || 'EUR';
+}
+
+export function usdRate(state) {
+  return state.settings.usdRate || DEFAULT_USD_RATE;
+}
+
+export function toEur(state, cents, currency) {
+  return currency === 'USD' ? Math.round(cents * usdRate(state)) : cents;
+}
+
+export function shareOf(acc) {
+  return (acc?.share ?? 100) / 100;
+}
+
+export function hasUsd(state) {
+  return state.accounts.some((a) => currencyOf(a) === 'USD');
+}
+
+// What part of an account's balance is yours, in EUR.
+export function yourValue(state, acc, upto = null) {
+  return Math.round(toEur(state, accountBalance(state, acc.id, upto), currencyOf(acc)) * shareOf(acc));
 }
 
 export const ACCOUNT_KINDS = {
@@ -56,7 +87,7 @@ export function accountBalance(state, accountId, upto = null) {
 }
 
 export function netWorth(state, upto = null) {
-  return state.accounts.reduce((s, a) => s + accountBalance(state, a.id, upto), 0);
+  return state.accounts.reduce((s, a) => s + yourValue(state, a, upto), 0);
 }
 
 export function netWorthSeries(state, months = 6) {
@@ -97,18 +128,21 @@ function txKind(state, tx) {
 export function periodSummary(state, from, to) {
   let spent = 0, income = 0;
   const byCat = new Map();
+  const accounts = new Map(state.accounts.map((a) => [a.id, a]));
   for (const t of state.transactions) {
     if (t.date < from || t.date > to) continue;
+    const acc = accounts.get(t.accountId);
+    const amount = Math.round(toEur(state, t.amount, currencyOf(acc)) * shareOf(acc));
     const kind = txKind(state, t);
     if (kind === 'expense') {
-      spent -= t.amount;
+      spent -= amount;
       const key = t.category || null;
       const e = byCat.get(key) || { id: key, amount: 0, count: 0 };
-      e.amount -= t.amount;
+      e.amount -= amount;
       e.count++;
       byCat.set(key, e);
     } else if (kind === 'income') {
-      income += t.amount;
+      income += amount;
     }
   }
   const categories = [...byCat.values()].filter((c) => c.amount > 0).sort((a, b) => b.amount - a.amount);
@@ -264,4 +298,92 @@ export function refreshChecks(state) {
     const { diff } = checkDiff(state, c);
     if (c.status === 'open' && diff === 0) { c.status = 'fixed'; c.resolvedAt = new Date().toISOString(); }
   }
+}
+
+// ---------- recurring payments and the plan ----------
+
+export const FREQUENCIES = {
+  monthly: { label: 'Every month', months: 1 },
+  quarterly: { label: 'Every 3 months', months: 3 },
+  'half-yearly': { label: 'Every 6 months', months: 6 },
+  yearly: { label: 'Every year', months: 12 },
+  once: { label: 'Once', months: 0 },
+};
+
+function median(xs) {
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
+// Payments that come back at a steady rhythm: same payee, similar amount, about a month (or 3, 6, 12) apart.
+export function recurringPayments(state) {
+  const groups = new Map();
+  for (const t of state.transactions) {
+    if (t.amount >= 0 || t.source === 'opening' || t.source === 'correction') continue;
+    if (category(state, t.category)?.kind === 'neutral') continue;
+    const key = t.accountId + '|' + normalizePayee(t.payee);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(t);
+  }
+  const planned = new Set((state.plans || []).map((p) => normalizePayee(p.name)));
+  const out = [];
+  for (const txs of groups.values()) {
+    if (txs.length < 2) continue;
+    txs.sort((a, b) => a.date.localeCompare(b.date));
+    const amounts = txs.map((t) => -t.amount);
+    const typical = median(amounts);
+    if (amounts.some((a) => Math.abs(a - typical) > typical * 0.15)) continue;
+    const gaps = txs.slice(1).map((t, i) => daysBetween(txs[i].date, t.date));
+    const gap = median(gaps);
+    const frequency = gap >= 25 && gap <= 35 ? 'monthly' : gap >= 85 && gap <= 95 ? 'quarterly' : gap >= 175 && gap <= 190 ? 'half-yearly' : gap >= 355 && gap <= 375 ? 'yearly' : null;
+    if (!frequency || gaps.some((g) => Math.abs(g - gap) > 7 + gap * 0.1)) continue;
+    const last = txs[txs.length - 1];
+    if (planned.has(normalizePayee(last.payee))) continue;
+    out.push({ payee: last.payee, amount: -typical, frequency, last: last.date, next: addMonthsKeepDay(last.date, FREQUENCIES[frequency].months), accountId: last.accountId, category: last.category, count: txs.length });
+  }
+  return out.sort((a, b) => a.next.localeCompare(b.next));
+}
+
+// Due dates of a planned payment between from and to (inclusive).
+export function occurrences(plan, from, to) {
+  const step = FREQUENCIES[plan.frequency]?.months || 0;
+  const dates = [];
+  let d = plan.due;
+  if (!step) return d >= from && d <= to ? [d] : [];
+  for (let i = 0; d <= to && i < 600; i++) {
+    if (d >= from) dates.push(d);
+    d = addMonthsKeepDay(plan.due, step * (i + 1));
+  }
+  return dates;
+}
+
+function addMonthsKeepDay(date, n) {
+  const start = addMonths(date, n);
+  const day = Math.min(Number(date.slice(8)), Number(monthEnd(start).slice(8)));
+  return start.slice(0, 8) + String(day).padStart(2, '0');
+}
+
+// The next `months` months with what's planned in each.
+export function planTimeline(state, months = 12) {
+  const t = today();
+  const out = [];
+  for (let i = 0; i < months; i++) {
+    const start = i === 0 ? t : addMonths(t, i);
+    const end = monthEnd(start);
+    const items = [];
+    for (const p of state.plans || []) for (const date of occurrences(p, start, end)) items.push({ plan: p, date });
+    items.sort((a, b) => a.date.localeCompare(b.date));
+    out.push({ month: monthStart(start), items, total: items.reduce((s, x) => s + x.plan.amount, 0) });
+  }
+  return out;
+}
+
+// What to put aside each month so the yearly, half-yearly and quarterly costs are covered when they come.
+export function monthlyReserve(state) {
+  let perYear = 0;
+  for (const p of state.plans || []) {
+    const step = FREQUENCIES[p.frequency]?.months;
+    if (step > 1 && p.amount < 0) perYear += -p.amount * (12 / step);
+  }
+  return Math.round(perYear / 12);
 }

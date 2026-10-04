@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyState, accountBalance, periodSummary, checkDiff, fixSuggestions, findExisting, payPalMatch, correctionTx, refreshChecks } from '../src/model.js';
+import { emptyState, netWorth, recurringPayments, planTimeline, monthlyReserve, occurrences, accountBalance, periodSummary, checkDiff, fixSuggestions, findExisting, payPalMatch, correctionTx, refreshChecks } from '../src/model.js';
 import { suggestCategory, normalizePayee, learn } from '../src/categorize.js';
 import { today, monthStart } from '../src/format.js';
 import { deriveKey, encryptJson, decryptJson, newSalt } from '../src/crypto.js';
@@ -83,4 +83,36 @@ test('encrypts and refuses the wrong passcode', async () => {
   assert.deepEqual(await decryptJson(key, box), { a: 1 });
   const wrong = await deriveKey('654321', salt, 1000);
   await assert.rejects(decryptJson(wrong, box));
+});
+
+test('a shared account counts at your share, and USD accounts count in EUR', () => {
+  const s = emptyState();
+  s.settings.usdRate = 0.9;
+  s.accounts.push({ id: 'joint', name: 'Joint', kind: 'bank', share: 50 });
+  s.accounts.push({ id: 'kr', name: 'Kraken', kind: 'crypto', currency: 'USD' });
+  s.transactions.push({ id: '1', accountId: 'joint', amount: 200000, date: T, payee: 'Starting balance', category: 'correction', source: 'opening' });
+  s.transactions.push({ id: '2', accountId: 'joint', amount: -10000, date: T, payee: 'REWE', category: 'groceries' });
+  s.transactions.push({ id: '3', accountId: 'kr', amount: 100000, date: T, payee: 'Starting balance', category: 'correction', source: 'opening' });
+  assert.equal(netWorth(s), 95000 + 90000);
+  assert.equal(periodSummary(s, monthStart(T), T).spent, 5000);
+});
+
+test('finds monthly payments and plans yearly ones', () => {
+  const s = emptyState();
+  s.accounts.push({ id: 'b', name: 'Bank', kind: 'bank' });
+  for (const [i, d] of ['2026-06-03', '2026-07-03', '2026-08-04', '2026-09-03'].entries())
+    s.transactions.push({ id: 'n' + i, accountId: 'b', amount: -1299, date: d, payee: 'Netflix.com', category: 'subscriptions' });
+  s.transactions.push({ id: 'x', accountId: 'b', amount: -4217, date: '2026-09-10', payee: 'REWE', category: 'groceries' });
+  const r = recurringPayments(s);
+  assert.equal(r.length, 1);
+  assert.equal(r[0].frequency, 'monthly');
+  assert.equal(r[0].next, '2026-10-03');
+
+  s.plans.push({ id: 'p', name: 'Car insurance', amount: -48000, frequency: 'yearly', due: '2027-01-01' });
+  s.plans.push({ id: 'q', name: 'Gym', amount: -3000, frequency: 'monthly', due: '2026-01-15' });
+  assert.deepEqual(occurrences(s.plans[0], '2026-01-01', '2028-12-31'), ['2027-01-01', '2028-01-01']);
+  assert.equal(monthlyReserve(s), 4000);
+  const tl = planTimeline(s, 12);
+  assert.equal(tl.length, 12);
+  assert.ok(tl.some((m) => m.items.some((x) => x.plan.id === 'p')));
 });

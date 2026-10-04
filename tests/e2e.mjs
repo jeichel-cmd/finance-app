@@ -55,16 +55,25 @@ const paypalShot = await drawScreenshot('paypal', `
   <div class="r"><span>Zalando refund</span><span>+€13.50</span></div>`);
 
 const krakenShot = await drawScreenshot('kraken', `
-  <div class="h">Kraken</div><div class="b">Total balance</div><div class="big">€1,807.00</div>
+  <div class="h">Kraken</div><div class="b">Total balance</div><div class="big">$1,950.00</div>
   <div class="r"><span>Bitcoin</span><span>0.0123 BTC</span></div>
   <div class="r"><span>Ethereum</span><span>0.41 ETH</span></div>`, true);
+
+const overviewShot = await drawScreenshot('overview', `
+  <div class="h">Home</div><div class="big">€1,597.63</div><div class="b">Current accounts (2/3) ></div>
+  <div class="r"><span>Girokonto</span><span>€1,597.63</span></div>
+  <div class="r"><span>Gemeinschaftskonto</span><span>€2,400.00</span></div>
+  <div class="r"><span>Personalize</span><span></span></div>`);
 
 const page = await browser.newPage({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2, hasTouch: true, isMobile: true });
 const errors = [];
 const external = [];
 page.on('pageerror', (e) => errors.push(e.message));
 page.on('console', (m) => { if (m.type() === 'error' && !/^Estimating resolution/.test(m.text())) errors.push(m.text()); });
-page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('blob:') && !r.url().startsWith('data:')) external.push(r.url()); });
+page.on('request', (r) => { if (!r.url().startsWith(base) && !r.url().startsWith('blob:') && !r.url().startsWith('data:') && !r.url().startsWith('https://api.frankfurter.')) external.push(r.url()); });
+// The only allowed outside request: the ECB dollar rate, answered here with a fixed rate.
+let rateRequests = 0;
+await page.route('https://api.frankfurter.**/**', (route) => { rateRequests++; route.fulfill({ contentType: 'application/json', headers: { 'access-control-allow-origin': '*' }, body: JSON.stringify({ amount: 1, base: 'USD', date: '2026-10-02', rates: { EUR: 0.9 } }) }); });
 
 const shot = (name) => page.screenshot({ path: `${out}/${name}.png`, fullPage: true });
 const step = (s) => console.log('·', s);
@@ -78,10 +87,10 @@ await page.getByText('Add your first account').waitFor();
 await shot('02-empty');
 step('set up');
 
-async function scan(file, { account } = {}) {
+async function scan(file, { account, mode = 'payments' } = {}) {
   await page.goto(base + '#/scan' + (account ? `?account=${account}` : ''));
-  await page.locator('input[type=file]').setInputFiles(file);
-  await page.getByText('Check what was read').waitFor({ timeout: 180000 });
+  await page.locator(account ? 'input[type=file]' : `input[data-mode=${mode}]`).setInputFiles(file);
+  await page.getByText(mode === 'balances' ? 'Check the balances' : 'Check what was read').waitFor({ timeout: 180000 });
 }
 
 // 1. Bank screenshot creates the account with its starting balance.
@@ -128,28 +137,64 @@ await page.getByText('PayPal matches').waitFor();
 await shot('07-fixed');
 step('mismatch fixed');
 
-// 3. Dark-mode exchange screenshot.
-await scan(krakenShot);
-await page.locator('[data-draft=newName]').fill('Kraken');
-await page.getByLabel('Type').selectOption('crypto');
+// 3. Dark-mode exchange screenshot in dollars, as a balance.
+await scan(krakenShot, { mode: 'balances' });
+await page.locator('[data-bal-field=newName]').fill('Kraken');
+await page.locator('[data-bal-field=newKind]').selectOption('crypto');
+if (await page.locator('[data-bal-field=currency]').inputValue() !== 'USD') throw new Error('Kraken balance not read as dollars');
 await shot('08-review-kraken');
-await page.getByRole('button', { name: 'Save' }).click();
-await page.waitForURL(/#\/account\//);
+await page.getByRole('button', { name: 'Update balances' }).click();
+await page.getByText('Kraken', { exact: true }).waitFor();
+step('dollar account added');
+
+// 4. An overview screen with several balances: skip one, add a joint account at 50%.
+await scan(overviewShot, { mode: 'balances' });
+const labels = await page.locator('[data-bal] .row-title').allTextContents();
+console.log('  balances:', labels.join(' | '));
+if (labels.length !== 2) throw new Error('expected 2 balances, got ' + labels.join(', '));
+await page.locator('[data-bal="0"] [data-bal-field=target]').selectOption('skip');
+await page.locator('[data-bal="1"] [data-bal-field=newName]').fill('Joint account');
+await page.locator('[data-bal="1"] [data-bal-field=share]').selectOption('50');
+await shot('09-review-balances');
+await page.getByRole('button', { name: 'Update balances' }).click();
+await page.getByText('Joint account', { exact: true }).waitFor();
+step('balances updated');
+
+// 5. Plan: a yearly car insurance and a monthly gym.
+const inMonths = (n, day) => { const d = new Date(); d.setDate(1); d.setMonth(d.getMonth() + n); d.setDate(day); return d.toISOString().slice(0, 10); };
+for (const [name, amount, freq, due] of [['Car insurance', '480', 'yearly', inMonths(3, 1)], ['Gym', '30', 'monthly', new Date(Date.now() + 10 * 864e5).toISOString().slice(0, 10)]]) {
+  await page.goto(base + '#/plan-edit/new');
+  await page.getByLabel('What is it').fill(name);
+  await page.getByLabel('Amount').fill(amount);
+  await page.getByLabel('How often').selectOption(freq);
+  await page.getByLabel("Next time it's due").fill(due);
+  await page.getByRole('button', { name: 'Add to plan' }).click();
+  await page.waitForURL(/#\/plan$/);
+}
+await shot('10-plan');
+const reserve = await page.locator('.card .mid-number').nth(1).textContent();
+console.log('  put aside monthly:', reserve);
+if (!/40/.test(reserve)) throw new Error('expected €40 a month for a €480 yearly cost');
+step('plan');
 
 await page.goto(base + '#/');
 await page.getByText('Total', { exact: true }).waitFor();
-await shot('09-overview');
+await page.getByText('Coming up').waitFor();
+await shot('11-overview');
 const total = await page.locator('.big-number').textContent();
 console.log('  total:', total);
+// 2,346.84 bank + 63.50 PayPal + 1,950 $ × 0.9 + 50% of 2,400
+if (!/5,?365\.34/.test(total)) throw new Error('unexpected total ' + total);
+if (!rateRequests) throw new Error('dollar rate was never requested');
 
 await page.goto(base + '#/spending');
-await shot('10-spending');
+await shot('12-spending');
 const spent = await page.locator('.card .mid-number').first().textContent();
 console.log('  spent this month:', spent);
 
 await page.emulateMedia({ colorScheme: 'dark' });
 await page.goto(base + '#/');
-await shot('11-overview-dark');
+await shot('13-overview-dark');
 
 // Lock and unlock: data survives, wrong passcode refused.
 await page.getByRole('button', { name: 'Lock' }).click();
@@ -172,4 +217,4 @@ await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));
 if (errors.length) throw new Error('browser errors: ' + errors.join('\n'));
-console.log('e2e passed; no requests to other servers');
+console.log('e2e passed; the only outside request was the dollar rate');
