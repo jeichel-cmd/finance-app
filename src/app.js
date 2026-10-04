@@ -241,7 +241,7 @@ function viewSetup() {
     </main>`;
   }
   return `<main class="page narrow centered">
-    <div class="brand-mark" aria-hidden="true">€</div>
+    <img class="brand-mark" src="icons/icon.svg" alt="" aria-hidden="true">
     <h1>Your money, on your phone</h1>
     <p class="muted">Everything you add stays on this phone, encrypted with your passcode. Nothing is uploaded, not even your screenshots.</p>
     <form data-form="setup" class="stack">
@@ -257,7 +257,7 @@ function viewSetup() {
 
 function viewLock() {
   return `<main class="page narrow centered">
-    <div class="brand-mark" aria-hidden="true">${icons.lock}</div>
+    <img class="brand-mark" src="icons/icon.svg" alt="" aria-hidden="true">
     <h1>Unlock</h1>
     ${bio ? `<button class="button primary" data-action="bio-unlock">${icons.finger} Unlock with fingerprint</button>` : ''}
     <form data-form="unlock" class="stack">
