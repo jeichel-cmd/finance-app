@@ -192,6 +192,28 @@ await shot('12-spending');
 const spent = await page.locator('.card .mid-number').first().textContent();
 console.log('  spent this month:', spent);
 
+// An own transfer entered once: both accounts change, the summary doesn't.
+const cameIn = await page.locator('.card .mid-number').nth(1).textContent();
+await page.goto(base + '#/');
+await page.getByRole('link', { name: /Sparkasse Giro/ }).click();
+await page.getByRole('link', { name: 'Add by hand' }).click();
+await page.getByLabel('Amount').fill('100');
+await page.getByLabel('Description').fill('Umbuchung');
+await page.getByLabel('Category').selectOption('transfer');
+await page.getByLabel('Other account').selectOption({ label: 'PayPal' });
+await shot('12b-transfer');
+await page.getByRole('button', { name: 'Add', exact: true }).click();
+await page.getByText('PayPal has the other side').waitFor();
+await page.goto(base + '#/');
+const totalAfter = await page.locator('.big-number').textContent();
+if (!/5,?365\.34/.test(totalAfter)) throw new Error('transfer changed the total: ' + totalAfter);
+await page.getByRole('link', { name: /PayPal/ }).click();
+await page.getByText('From Sparkasse Giro', { exact: true }).waitFor();
+await page.goto(base + '#/spending');
+if (await page.locator('.card .mid-number').first().textContent() !== spent) throw new Error('transfer counted as spending');
+if (await page.locator('.card .mid-number').nth(1).textContent() !== cameIn) throw new Error('transfer counted as money in');
+step('own transfer');
+
 await page.emulateMedia({ colorScheme: 'dark' });
 await page.goto(base + '#/');
 await shot('13-overview-dark');

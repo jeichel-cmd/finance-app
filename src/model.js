@@ -210,7 +210,61 @@ export function findExisting(state, accountId, tx, exclude = new Set()) {
     !exclude.has(t.id) &&
     t.amount === tx.amount &&
     Math.abs(daysBetween(t.date, tx.date)) <= (tx.dateGuessed ? 10 : 3) &&
-    samePayee(t.payee, tx.payee)) || null;
+    // The app names the other side of a transfer itself, so the bank's wording won't match it.
+    (samePayee(t.payee, tx.payee) || t.source === 'transfer')) || null;
+}
+
+// ---------- own transfers: one move between two accounts, saved as a linked pair ----------
+
+export function transferPartner(state, tx) {
+  if (!tx.transferId) return null;
+  return state.transactions.find((t) => t.transferId === tx.transferId && t.id !== tx.id) || null;
+}
+
+function convert(state, cents, from, to) {
+  if (from === to) return cents;
+  const eur = toEur(state, cents, from);
+  return to === 'USD' ? Math.round(eur / usdRate(state)) : eur;
+}
+
+// Links tx to its other side in otherAccountId: an unlinked matching transaction already there
+// (e.g. from a screenshot), or a new one. Returns the other side.
+export function linkTransfer(state, tx, otherAccountId) {
+  const accs = new Map(state.accounts.map((a) => [a.id, a]));
+  const from = currencyOf(accs.get(tx.accountId)), to = currencyOf(accs.get(otherAccountId));
+  const amount = -convert(state, tx.amount, from, to);
+  const slack = from === to ? 0 : Math.abs(amount) * 0.03; // exchange rates differ a little
+  let other = transferPartner(state, tx);
+  if (other && other.accountId !== otherAccountId) { unlinkTransfer(state, tx); other = null; }
+  if (!other) {
+    other = state.transactions.find((t) => t.accountId === otherAccountId && !t.transferId && t.id !== tx.id &&
+      Math.abs(t.amount - amount) <= slack &&
+      Math.abs(daysBetween(t.date, tx.date)) <= 4) || null;
+    if (!other) {
+      other = { id: uid(), accountId: otherAccountId, source: 'transfer', createdAt: new Date().toISOString() };
+      state.transactions.push(other);
+    }
+  }
+  tx.transferId = tx.transferId || uid();
+  tx.category = 'transfer';
+  other.transferId = tx.transferId;
+  other.category = 'transfer';
+  if (other.source === 'transfer') {
+    const name = accs.get(tx.accountId)?.name || 'another account';
+    Object.assign(other, { amount, date: tx.date, payee: `${amount < 0 ? 'To' : 'From'} ${name}`, note: tx.note || '' });
+  } else if (tx.source === 'transfer') {
+    Object.assign(other, { amount, date: tx.date });
+  }
+  return other;
+}
+
+// Splits a pair. The other side goes away if the app made it; a scanned one stays.
+export function unlinkTransfer(state, tx) {
+  const other = transferPartner(state, tx);
+  delete tx.transferId;
+  if (!other) return;
+  if (other.source === 'transfer') state.transactions = state.transactions.filter((t) => t !== other);
+  else delete other.transferId;
 }
 
 // For a bank debit to PayPal, the PayPal payment it paid for.

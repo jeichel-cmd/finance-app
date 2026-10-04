@@ -7,7 +7,7 @@ import {
   changeSince, periodSummary, monthlySpending, spendingInsight, categorySuggestions, uncategorisedCount,
   findExisting, payPalMatch, checkDiff, openChecks, accountStatus, fixSuggestions, correctionTx, refreshChecks,
   countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
-  monthlyReserve, FREQUENCIES,
+  monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer,
 } from './model.js';
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc } from './format.js';
 import { lineChart, barChart } from './charts.js';
@@ -869,6 +869,8 @@ function viewTx(id, q) {
   const match = !isNew ? payPalMatch(state, t) : null;
   const back = q.get('check') ? `#/fix/${q.get('check')}` : acc ? `#/account/${acc.id}` : '#/';
   const out = isNew ? !(t.amount > 0) : t.amount < 0;
+  const partner = isNew ? null : transferPartner(state, t);
+  const isTransfer = t.category === 'transfer';
   return `<main class="page">
     ${backBar(back, isNew ? 'Add transaction' : 'Transaction')}
     <form data-form="tx" data-id="${esc(id)}" data-check="${esc(q.get('check') || '')}" class="stack">
@@ -882,7 +884,10 @@ function viewTx(id, q) {
         <label class="field">Date<input type="date" name="date" value="${esc(t.date)}" required></label>
         <label class="field">Account<select name="accountId">${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === t.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
       </div>
-      <label class="field">Category<select name="category" data-change="touch">${categoryOptions(t.category)}</select></label>
+      <label class="field">Category<select name="category" data-change="tx-category">${categoryOptions(t.category)}</select></label>
+      <label class="field ${isTransfer ? '' : 'hidden'}" data-transfer-only>Other account
+        <select name="transferTo"><option value="">Not in the app</option>${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === partner?.accountId ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select>
+        <span class="hint">The app adds the other side there for you, so you enter the move once. Own transfers never count as money in or out.</span></label>
       ${bank ? `<label class="inline-check"><input type="checkbox" name="paidFrom" ${t.paidFrom || (isNew && out) ? 'checked' : ''}>Paid from ${esc(bank.name)} (doesn't change the ${esc(acc.name)} balance)</label>` : ''}
       ${match ? `<p class="note">This bank debit paid for ${esc(match.payee)} in ${esc(accountById(match.accountId)?.name || 'PayPal')}, so it counts as a transfer, not spending.</p>` : ''}
       <label class="field">Note<input name="note" value="${esc(t.note || '')}" placeholder="Optional"></label>
@@ -1174,6 +1179,12 @@ const forms = {
     }
     if (bank && f.get('paidFrom') && amount < 0) t.paidFrom = bank.id;
     else delete t.paidFrom;
+    const transferTo = fields.category === 'transfer' ? f.get('transferTo') : '';
+    if (transferTo && transferTo === accountId) { toast('Pick a different account for the other side.'); return; }
+    if (transferTo) {
+      const other = linkTransfer(state, t, transferTo);
+      toast(`Saved. ${accountById(other.accountId)?.name} has the other side.`);
+    } else if (t.transferId) unlinkTransfer(state, t);
     if (form.querySelector('[name=category]').dataset.touched && fields.category) learn(state.rules, fields.payee, fields.category);
     commit({ rerender: false });
     const check = form.dataset.check;
@@ -1333,6 +1344,7 @@ const actions = {
   'delete-tx'(el) {
     if (!confirm('Delete this transaction?')) return;
     const t = state.transactions.find((x) => x.id === el.dataset.id);
+    unlinkTransfer(state, t);
     state.transactions = state.transactions.filter((x) => x !== t);
     commit({ rerender: false });
     go(`#/account/${t.accountId}`);
@@ -1422,6 +1434,7 @@ const changes = {
   'set-category'(el) {
     const t = state.transactions.find((x) => x.id === el.dataset.id);
     t.category = el.value || null;
+    if (t.category !== 'transfer' && t.transferId) unlinkTransfer(state, t);
     learn(state.rules, t.payee, t.category);
     commit({ rerender: false });
     toast(`Moved to ${catName(t.category)}.`);
@@ -1433,6 +1446,10 @@ const changes = {
   },
   touch(el) {
     el.dataset.touched = '1';
+  },
+  'tx-category'(el) {
+    el.dataset.touched = '1';
+    el.form.querySelector('[data-transfer-only]')?.classList.toggle('hidden', el.value !== 'transfer');
   },
 };
 

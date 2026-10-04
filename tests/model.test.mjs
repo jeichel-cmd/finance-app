@@ -116,3 +116,35 @@ test('finds monthly payments and plans yearly ones', () => {
   assert.equal(tl.length, 12);
   assert.ok(tl.some((m) => m.items.some((x) => x.plan.id === 'p')));
 });
+
+test('an own transfer is one linked pair that counts as neither spending nor income', async () => {
+  const { linkTransfer, unlinkTransfer, transferPartner } = await import('../src/model.js');
+  const s = setup();
+  s.accounts.push({ id: 'save', name: 'Tagesgeld', kind: 'bank' });
+  const before = periodSummary(s, monthStart(T), T);
+  const t = { id: 'm', accountId: 'bank', amount: -50000, payee: 'Umbuchung', date: T, category: 'transfer', source: 'manual' };
+  s.transactions.push(t);
+  const other = linkTransfer(s, t, 'save');
+  assert.equal(other.amount, 50000);
+  assert.equal(other.payee, 'From Sparkasse');
+  assert.equal(accountBalance(s, 'save'), 50000);
+  assert.deepEqual(periodSummary(s, monthStart(T), T), before);
+  assert.equal(netWorth(s), netWorth({ ...s, transactions: s.transactions.filter((x) => x !== t && x !== other) }));
+  // A later screenshot of the savings account finds the saved side instead of adding it again.
+  assert.equal(findExisting(s, 'save', { payee: 'Jeremy Girokonto', amount: 50000, date: T }).id, other.id);
+  unlinkTransfer(s, t);
+  assert.equal(transferPartner(s, t), null);
+  assert.equal(accountBalance(s, 'save'), 0);
+});
+
+test('linking picks up the other side when it is already there', async () => {
+  const { linkTransfer } = await import('../src/model.js');
+  const s = setup();
+  s.accounts.push({ id: 'save', name: 'Tagesgeld', kind: 'bank' });
+  s.transactions.push({ id: 'in', accountId: 'save', amount: 20000, payee: 'Gutschrift', date: T, category: null, source: 'scan' });
+  const t = { id: 'out', accountId: 'bank', amount: -20000, payee: 'Übertrag', date: T, category: 'transfer' };
+  s.transactions.push(t);
+  assert.equal(linkTransfer(s, t, 'save').id, 'in');
+  assert.equal(s.transactions.length, 7);
+  assert.equal(periodSummary(s, monthStart(T), T).income, 0);
+});
