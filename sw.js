@@ -1,5 +1,5 @@
 // Keeps the app working offline. The app never talks to any server except the one it was installed from.
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL = `shell-${VERSION}`;
 const READER = 'reader-v1';
 
@@ -22,6 +22,7 @@ const SHELL_FILES = [
   'src/charts.js',
   'src/icons.js',
   'src/logos.js',
+  'src/biometric.js',
 ];
 
 self.addEventListener('install', (e) => {

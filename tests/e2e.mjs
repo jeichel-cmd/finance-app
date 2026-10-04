@@ -21,7 +21,7 @@ const server = createServer(async (req, res) => {
     res.writeHead(404).end();
   }
 }).listen(0);
-const base = `http://127.0.0.1:${server.address().port}/`;
+const base = `http://localhost:${server.address().port}/`;
 
 const browser = await chromium.launch({ executablePath: process.env.CHROMIUM || '/opt/pw-browsers/chromium' });
 
@@ -212,6 +212,28 @@ const stored = await page.evaluate(() => new Promise((res) => {
 }));
 if (/Sparkasse|REWE|Spotify/.test(stored)) throw new Error('data stored unencrypted');
 step('storage is encrypted');
+
+// Fingerprint unlock, with a virtual fingerprint sensor that supports the PRF extension.
+const cdp = await page.context().newCDPSession(page);
+await cdp.send('WebAuthn.enable');
+await cdp.send('WebAuthn.addVirtualAuthenticator', { options: { protocol: 'ctap2', ctap2Version: 'ctap2_1', transport: 'internal', hasResidentKey: true, hasUserVerification: true, isUserVerified: true, hasPrf: true } });
+await page.goto(base + '#/settings');
+await page.reload();
+await page.getByLabel('Passcode').fill('246810');
+await page.getByRole('button', { name: 'Unlock' }).click();
+await page.getByLabel('Your passcode, to confirm').fill('246810');
+await page.getByRole('button', { name: 'Turn on' }).click();
+await page.getByText('Fingerprint unlock is on').waitFor();
+await page.getByRole('button', { name: 'Lock now' }).click();
+await shot('14-lock-fingerprint');
+await page.getByRole('button', { name: 'Unlock with fingerprint' }).click();
+await page.getByText('Fingerprint or Face ID').waitFor();
+const bioRow = await page.evaluate(() => new Promise((res) => {
+  const r = indexedDB.open('finance-app');
+  r.onsuccess = () => r.result.transaction('vault').objectStore('vault').get('bio').onsuccess = (e) => res(JSON.stringify(e.target.result));
+}));
+if (bioRow.includes('246810')) throw new Error('passcode stored in the clear');
+step('fingerprint unlock');
 
 await browser.close();
 server.close();

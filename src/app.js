@@ -13,6 +13,7 @@ import { money, percent, today, addDays, addMonths, monthStart, monthLabel, date
 import { lineChart, barChart } from './charts.js';
 import { icons } from './icons.js';
 import { BRANDS, brandOf, logoSvg } from './logos.js';
+import * as biometric from './biometric.js';
 
 const $app = document.getElementById('app');
 const ACCOUNT_COLORS = ['#1D4ED8', '#9F2D20', '#0F766E', '#7C3AED', '#A16207', '#BE185D', '#0E7490', '#15171A'];
@@ -20,6 +21,8 @@ const LOCK_AFTER_MS = 3 * 60 * 1000;
 
 let state = null;
 let vaultExists = false;
+let bio = null; // fingerprint unlock data, when turned on
+let bioAvailable = false;
 let unlockError = '';
 let restoreText = null;
 let draft = null;
@@ -255,10 +258,11 @@ function viewLock() {
   return `<main class="page narrow centered">
     <div class="brand-mark" aria-hidden="true">${icons.lock}</div>
     <h1>Unlock</h1>
+    ${bio ? `<button class="button primary" data-action="bio-unlock">${icons.finger} Unlock with fingerprint</button>` : ''}
     <form data-form="unlock" class="stack">
-      <label class="field">Passcode<input type="password" name="pass" inputmode="numeric" autocomplete="current-password" required autofocus></label>
+      <label class="field">Passcode<input type="password" name="pass" inputmode="numeric" autocomplete="current-password" required ${bio ? '' : 'autofocus'}></label>
       ${unlockError ? `<p class="error" role="alert">${esc(unlockError)}</p>` : ''}
-      <button class="button primary" type="submit">Unlock</button>
+      <button class="button ${bio ? 'secondary' : 'primary'}" type="submit">Unlock</button>
     </form>
     <button class="button plain" data-action="forgot">Forgot your passcode?</button>
   </main>`;
@@ -1021,6 +1025,17 @@ function viewSettings() {
       </div>
     </section>
     <section>
+      <div class="section-head"><h2>Fingerprint or Face ID</h2></div>
+      ${bio ? `<p class="small muted">On. You can unlock with your fingerprint or face; the passcode still works too.</p>
+        <button class="button secondary" data-action="bio-off">Turn off</button>`
+      : bioAvailable ? `<p class="small muted">Unlock without typing your passcode. Your phone keeps the fingerprint; the app never sees it.</p>
+        <form data-form="bio-on" class="stack">
+          <label class="field">Your passcode, to confirm<input type="password" name="pass" inputmode="numeric" autocomplete="current-password" required></label>
+          <button class="button secondary" type="submit">Turn on</button>
+        </form>`
+      : `<p class="small muted">This phone or browser doesn't offer it. It needs a screen lock with fingerprint or face and a recent iOS (18+) or Android with Chrome.</p>`}
+    </section>
+    <section>
       <div class="section-head"><h2>Passcode</h2></div>
       <form data-form="passcode" class="stack">
         <label class="field">New passcode<input type="password" name="p1" inputmode="numeric" autocomplete="new-password" minlength="6" required></label>
@@ -1081,15 +1096,23 @@ const forms = {
     unlockError = '';
     go('#/');
   },
-  async unlock(f) {
-    const btn = $app.querySelector('button[type=submit]');
-    if (btn) { btn.disabled = true; btn.textContent = 'Unlocking…'; }
-    const s = await store.unlock(f.get('pass'));
-    if (!s) return fail('That passcode is not right.');
-    state = { ...emptyState(), ...s };
-    unlockError = '';
-    render();
-    refreshRate();
+  unlock(f) {
+    return unlockWith(f.get('pass'));
+  },
+  async 'bio-on'(f, form) {
+    const btn = form.querySelector('button[type=submit]');
+    if (!(await store.checkPasscode(f.get('pass')))) return toast('That passcode is not right.');
+    btn.disabled = true;
+    try {
+      bio = await biometric.enroll(f.get('pass'));
+      await store.setBio(bio);
+      toast('Fingerprint unlock is on.');
+      render();
+    } catch (e) {
+      btn.disabled = false;
+      if (e.message === 'unsupported') toast("This phone can't do fingerprint unlock for web apps yet.");
+      else if (e.name !== 'NotAllowedError') toast("Couldn't turn it on. Try again.");
+    }
   },
   async 'restore-setup'(f) {
     const s = await store.readBackup(restoreText, f.get('pass')).catch(() => undefined);
@@ -1161,7 +1184,9 @@ const forms = {
     if (f.get('p1') !== f.get('p2')) return toast("The two passcodes don't match.");
     await store.changePasscode(state, f.get('p1'));
     form.reset();
+    if (bio) { bio = null; await store.clearBio(); }
     toast('Passcode changed. Older backups still open with the old passcode.');
+    render();
   },
   plan(f, form) {
     const id = form.dataset.id;
@@ -1200,6 +1225,17 @@ const forms = {
   },
 };
 
+async function unlockWith(pass) {
+  const btn = $app.querySelector('form[data-form=unlock] button[type=submit]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Unlocking…'; }
+  const s = await store.unlock(pass);
+  if (!s) return fail('That passcode is not right.');
+  state = { ...emptyState(), ...s };
+  unlockError = '';
+  render();
+  refreshRate();
+}
+
 function fail(message) {
   unlockError = message;
   render();
@@ -1213,9 +1249,22 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  async 'bio-unlock'() {
+    try {
+      await unlockWith(await biometric.passcode(bio));
+    } catch (e) {
+      fail(e.name === 'NotAllowedError' ? 'Fingerprint cancelled. You can use your passcode.' : "Fingerprint didn't work. Use your passcode.");
+    }
+  },
+  async 'bio-off'() {
+    bio = null;
+    await store.clearBio();
+    toast('Fingerprint unlock is off.');
+    render();
+  },
   forgot() {
     if (!confirm('Without the passcode the data can\'t be opened. Delete everything on this phone and start again? You can restore a backup afterwards.')) return;
-    store.wipe().then(() => { vaultExists = false; state = null; go('#/'); });
+    store.wipe().then(() => { vaultExists = false; bio = null; state = null; go('#/'); });
   },
   'cancel-restore'() { restoreText = null; unlockError = ''; render(); },
   'apply-suggestion'(el) {
@@ -1475,6 +1524,8 @@ window.addEventListener('pagehide', () => { if (saveTimer) flush(); });
 
 async function boot() {
   vaultExists = await store.hasVault();
+  [bio, bioAvailable] = await Promise.all([store.getBio().catch(() => null), biometric.available()]);
+  bio = bio || null;
   render();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('./sw.js').catch(() => {});

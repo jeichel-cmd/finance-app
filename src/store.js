@@ -65,6 +65,18 @@ export async function save(state) {
   await put('data', await encryptJson(key, state));
 }
 
+// Fingerprint unlock data (an encrypted copy of the passcode; see biometric.js).
+export const getBio = () => get('bio');
+export const setBio = (bio) => put('bio', bio);
+export const clearBio = () => tx('readwrite', (s) => s.delete('bio'));
+
+// True when the passcode opens the data, without changing what is unlocked.
+export async function checkPasscode(passcode) {
+  const m = await get('meta');
+  const k = await deriveKey(passcode, m.salt, m.iterations);
+  try { await decryptJson(k, await get('data')); return true; } catch { return false; }
+}
+
 export async function changePasscode(state, passcode) {
   meta = { ...meta, salt: newSalt(), iterations: ITERATIONS };
   key = await deriveKey(passcode, meta.salt, meta.iterations);
