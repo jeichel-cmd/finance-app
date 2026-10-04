@@ -9,7 +9,7 @@ import {
   countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
   monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer,
 } from './model.js';
-import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc } from './format.js';
+import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc, setMoneyHidden } from './format.js';
 import { lineChart, barChart } from './charts.js';
 import { icons } from './icons.js';
 import { BRANDS, brandOf, logoSvg } from './logos.js';
@@ -57,6 +57,7 @@ function paint(html, { tabs = false, active = '' } = {}) {
 function render() {
   if (!vaultExists) return paint(viewSetup());
   if (!state) return paint(viewLock());
+  setMoneyHidden(state.settings.hideMoney);
   const r = route();
   const [page, id] = r.parts;
   switch (page) {
@@ -270,11 +271,17 @@ function viewLock() {
 
 // ---------- overview ----------
 
+function hideButton() {
+  const hidden = state.settings.hideMoney;
+  return `<button class="icon-button" data-action="toggle-money" aria-pressed="${hidden ? 'true' : 'false'}" aria-label="${hidden ? 'Show amounts' : 'Hide amounts'}">${hidden ? icons.eyeOff : icons.eye}</button>`;
+}
+
 function viewOverview() {
   const t = today();
   const header = `<div class="topbar">
     <span class="eyebrow">${esc(monthLabel(t))}</span>
     <span class="topbar-extra">
+      ${hideButton()}
       <button class="icon-button" data-action="lock" aria-label="Lock">${icons.lock}</button>
     </span>
   </div>`;
@@ -292,7 +299,7 @@ function viewOverview() {
   const total = netWorth(state, t);
   const change = changeSince(state, monthStart(t));
   const before = total - change;
-  const pct = before > 0 && change ? ` (${percent(Math.abs(change) / before)})` : '';
+  const pct = before > 0 && change && !state.settings.hideMoney ? ` (${percent(Math.abs(change) / before)})` : '';
   const banners = openChecks(state).map((c) => {
     const acc = c.accountId ? accountById(c.accountId) : null;
     const { diff } = checkDiff(state, c);
@@ -435,7 +442,7 @@ function viewSpending(p) {
   const suggestions = categorySuggestions(state).slice(0, 3);
   const unc = uncategorisedCount(state);
   return `<main class="page">
-    <div class="topbar"><h1 class="page-title">Spending</h1></div>
+    <div class="topbar"><h1 class="page-title">Spending</h1><span class="topbar-extra">${hideButton()}</span></div>
     <div class="pills" role="tablist">${Object.entries(PERIODS).map(([k, v]) => `<a class="pill ${k === p ? 'active' : ''}" href="#/spending?p=${k}" role="tab" aria-selected="${k === p}">${v}</a>`).join('')}</div>
     <div class="cards">
       <div class="card"><div class="label">Spent</div><div class="mid-number">${money(s.spent)}</div></div>
@@ -1260,6 +1267,10 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  'toggle-money'() {
+    state.settings.hideMoney = !state.settings.hideMoney;
+    commit();
+  },
   async 'bio-unlock'() {
     try {
       await unlockWith(await biometric.passcode(bio));

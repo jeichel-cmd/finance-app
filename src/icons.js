@@ -11,6 +11,8 @@ export const icons = {
   list: svg('<path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/>', 28),
   wallet: svg('<rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 10h18"/><path d="M16 15h2"/>', 28),
   finger: svg('<path d="M12 11v3a8 8 0 0 1-1 4"/><path d="M8 11a4 4 0 0 1 8 0v1a12 12 0 0 1-.6 4"/><path d="M5 12V11a7 7 0 0 1 12.5-4.3"/><path d="M19.6 9.5A7 7 0 0 1 19 15"/><path d="M8.5 15.5A10 10 0 0 1 7.5 19"/>', 20),
+  eye: svg('<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>', 20),
+  eyeOff: svg('<path d="M10.6 5.1A10.4 10.4 0 0 1 12 5c6.4 0 10 7 10 7a17 17 0 0 1-2.2 3.1"/><path d="M6.6 6.6A17 17 0 0 0 2 12s3.6 7 10 7a9.7 9.7 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/><path d="m2 2 20 20"/>', 20),
   back: svg('<path d="M15 18l-6-6 6-6"/>'),
   warn: svg('<path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/>'),
   check: svg('<path d="M20 6 9 17l-5-5"/>', 18),

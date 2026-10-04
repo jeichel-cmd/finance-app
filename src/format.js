@@ -8,8 +8,12 @@ function formatter(currency, short) {
   return formatters.get(key);
 }
 
+// When amounts are hidden (to show the app to someone), every amount renders as dots.
+let hidden = false;
+export function setMoneyHidden(value) { hidden = Boolean(value); }
+
 export function money(cents, { sign = false, short = false, currency = 'EUR' } = {}) {
-  const text = formatter(currency, short).format(Math.abs(cents) / 100);
+  const text = hidden ? (currency === 'USD' ? '$' : '€') + '••••' : formatter(currency, short).format(Math.abs(cents) / 100);
   if (cents < 0) return '− ' + text;
   if (sign && cents > 0) return '+ ' + text;
   return text;

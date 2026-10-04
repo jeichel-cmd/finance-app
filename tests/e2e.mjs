@@ -214,6 +214,16 @@ if (await page.locator('.card .mid-number').first().textContent() !== spent) thr
 if (await page.locator('.card .mid-number').nth(1).textContent() !== cameIn) throw new Error('transfer counted as money in');
 step('own transfer');
 
+// Hide amounts for showing the app to someone.
+await page.goto(base + '#/');
+await page.getByRole('button', { name: 'Hide amounts' }).click();
+if (!/€••••/.test(await page.locator('.big-number').textContent())) throw new Error('total not hidden');
+if (/\d,\d\d\d\.\d\d/.test(await page.locator('main').innerText())) throw new Error('an amount is still visible');
+await shot('12c-hidden');
+await page.getByRole('button', { name: 'Show amounts' }).click();
+if (!/5,?365\.34/.test(await page.locator('.big-number').textContent())) throw new Error('total not shown again');
+step('hide amounts');
+
 await page.emulateMedia({ colorScheme: 'dark' });
 await page.goto(base + '#/');
 await shot('13-overview-dark');
