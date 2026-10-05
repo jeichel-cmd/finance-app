@@ -507,7 +507,9 @@ function viewScan(accountId, mode) {
       <span class="row-title">${title}</span>
       <span class="small muted">${text}</span>
       <input type="file" accept="image/*" multiple data-change="scan-files" data-mode="${m}" data-account="${esc(accountId || '')}" aria-label="${esc(title)}">
-    </label>`;
+    </label>
+    <button class="button plain small paste-button" data-action="paste-shot" data-mode="${m}" data-account="${esc(accountId || '')}">Paste a copied screenshot</button>`;
+  const pasteTip = `<p class="small muted">Tip, so screenshots don't pile up in your photos: on iPhone, tap the screenshot preview, then Done, then <b>Copy and Delete</b>, and paste it here.</p>`;
   if (acc || mode === 'payments') {
     return `<main class="page narrow">
       ${backBar(acc ? `#/account/${esc(acc.id)}` : '#/scan', '')}
@@ -515,6 +517,7 @@ function viewScan(accountId, mode) {
       <p class="muted">A screenshot of the list of payments in one account. New ones are added; ones already saved are recognised. It's read on this phone and isn't stored or uploaded.</p>
       ${picker('payments', icons.list, 'Choose screenshots', 'You can pick several at once for a long list')}
       <ul class="tips"><li>If the balance is on the same screen, it's used to check nothing is missing.</li><li>You'll check everything before it's saved.</li></ul>
+      ${pasteTip}
     </main>`;
   }
   return `<main class="page narrow">
@@ -523,6 +526,7 @@ function viewScan(accountId, mode) {
     ${picker('balances', icons.wallet, 'Balances', 'An overview with one or more accounts and their balances. Updates those balances.')}
     ${picker('payments', icons.list, 'Payments', 'The list of payments in one account. Adds the new ones to that account.')}
     <p class="small muted">Light or dark mode both work, and cropping isn't needed. You'll check everything before it's saved.</p>
+    ${pasteTip}
   </main>`;
 }
 
@@ -1267,6 +1271,19 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  async 'paste-shot'(el) {
+    let images = [];
+    try {
+      for (const item of await navigator.clipboard.read()) {
+        const type = item.types.find((t) => t.startsWith('image/'));
+        if (type) images.push(await item.getType(type));
+      }
+    } catch {
+      return toast("Couldn't read the clipboard. Allow pasting when your phone asks.");
+    }
+    if (!images.length) return toast('No screenshot copied. Copy one first, then tap Paste.');
+    startScan(images, el.dataset.account || null, el.dataset.mode);
+  },
   'toggle-money'() {
     state.settings.hideMoney = !state.settings.hideMoney;
     commit();

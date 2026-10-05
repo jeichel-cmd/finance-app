@@ -267,6 +267,20 @@ const bioRow = await page.evaluate(() => new Promise((res) => {
 if (bioRow.includes('246810')) throw new Error('passcode stored in the clear');
 step('fingerprint unlock');
 
+// Paste a copied screenshot instead of picking it from the photos.
+await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+const png = (await readFile(bankShot)).toString('base64');
+await page.goto(base + '#/');
+await page.getByRole('link', { name: /Sparkasse Giro/ }).click();
+await page.getByRole('link', { name: 'Add screenshot' }).click();
+await page.evaluate(async (b64) => {
+  const blob = await (await fetch('data:image/png;base64,' + b64)).blob();
+  await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+}, png);
+await page.getByRole('button', { name: 'Paste a copied screenshot' }).click();
+await page.getByText('Check what was read').waitFor({ timeout: 180000 });
+step('paste a screenshot');
+
 await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));
