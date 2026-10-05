@@ -23,6 +23,7 @@ let state = null;
 let vaultExists = false;
 let bio = null; // fingerprint unlock data, when turned on
 let bioAvailable = false;
+let pickedHandles = null; // screenshots picked with Android's file picker, so they can be deleted after saving
 let unlockError = '';
 let restoreText = null;
 let draft = null;
@@ -648,6 +649,52 @@ function newAccount(fields) {
   return acc;
 }
 
+// ---------- deleting the screenshot from the phone (Android Chrome) ----------
+
+const canDeletePicked = () => 'showOpenFilePicker' in window && /Android/i.test(navigator.userAgent);
+
+async function pickScreenshots(input) {
+  let handles;
+  try {
+    handles = await window.showOpenFilePicker({ multiple: true, types: [{ description: 'Screenshots', accept: { 'image/*': ['.png', '.jpg', '.jpeg', '.webp'] } }] });
+  } catch (e) {
+    if (e.name !== 'AbortError') input.click(); // picker not usable: fall back to the normal one
+    return;
+  }
+  const files = await Promise.all(handles.map((h) => h.getFile()));
+  pickedHandles = handles.every((h) => typeof h.remove === 'function') ? handles : null;
+  startScan(files, input.dataset.account || null, input.dataset.mode || 'payments');
+}
+
+function offerDelete() {
+  const handles = pickedHandles;
+  pickedHandles = null;
+  if (!handles?.length) return;
+  document.querySelector('.sheet')?.remove();
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.setAttribute('role', 'dialog');
+  sheet.innerHTML = `<p class="row-title">Delete the screenshot${handles.length > 1 ? 's' : ''} from your phone?</p>
+    <p class="small muted">Everything you need is saved in the app.</p>
+    <div class="button-row"><button class="button plain" data-sheet="keep">Keep</button><button class="button primary" data-sheet="delete">Delete</button></div>`;
+  sheet.addEventListener('click', async (e) => {
+    const b = e.target.closest('[data-sheet]');
+    if (!b) return;
+    sheet.remove();
+    if (b.dataset.sheet !== 'delete') return;
+    let deleted = 0;
+    for (const h of handles) {
+      try {
+        if (h.requestPermission && (await h.requestPermission({ mode: 'readwrite' })) !== 'granted') continue;
+        await h.remove();
+        deleted++;
+      } catch { /* the phone refused; counted below */ }
+    }
+    toast(deleted === handles.length ? `Deleted from your phone.` : "Your phone didn't let the app delete it. You can delete it in your gallery.");
+  });
+  document.body.append(sheet);
+}
+
 function saveBalances() {
   const d = draft;
   const results = [];
@@ -668,9 +715,10 @@ function saveBalances() {
   refreshRate();
   const open = results.filter((x) => x.status === 'open');
   const ok = results.length - open.length;
-  if (open.length === 1) { go(`#/fix/${open[0].check.id}`); return; }
+  if (open.length === 1) { go(`#/fix/${open[0].check.id}`); offerDelete(); return; }
   toast(open.length ? `Updated ${ok} balance${ok === 1 ? '' : 's'}. ${open.length} don't match yet.` : `Updated ${results.length} balance${results.length === 1 ? '' : 's'}. Everything matches.`);
   go('#/');
+  offerDelete();
 }
 
 // ---------- payments in one account ----------
@@ -809,6 +857,7 @@ function saveDraft() {
   commit({ rerender: false });
   if (!goTo.startsWith('#/fix') && message) toast(message);
   go(goTo);
+  offerDelete();
 }
 
 // ---------- fixing a mismatch ----------
@@ -1444,6 +1493,7 @@ const changes = {
   },
   'scan-files'(el) {
     const files = [...el.files];
+    pickedHandles = null;
     if (files.length) startScan(files, el.dataset.account || null, el.dataset.mode || 'payments');
   },
   'draft-account'(el) {
@@ -1520,6 +1570,13 @@ function updateDraftRow(el) {
 // ---------- events ----------
 
 document.addEventListener('click', (e) => {
+  const picker = e.target.closest('input[data-change=scan-files]');
+  if (picker && canDeletePicked() && !picker.dataset.plain) {
+    e.preventDefault();
+    picker.dataset.plain = '1'; // a fallback click opens the normal picker
+    pickScreenshots(picker).finally(() => { delete picker.dataset.plain; });
+    return;
+  }
   const el = e.target.closest('[data-action]');
   if (!el) return;
   e.preventDefault();

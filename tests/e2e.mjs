@@ -281,6 +281,28 @@ await page.getByRole('button', { name: 'Paste a copied screenshot' }).click();
 await page.getByText('Check what was read').waitFor({ timeout: 180000 });
 step('paste a screenshot');
 
+// Android: a screenshot picked with the file picker can be deleted from the phone after saving.
+await page.evaluate(() => {
+  Object.defineProperty(navigator, 'userAgent', { get: () => 'Mozilla/5.0 (Linux; Android 15) Chrome/140 Mobile' });
+  window.__deleted = 0;
+  window.showOpenFilePicker = async () => {
+    return [{ getFile: async () => new File([window.__shot], 'Screenshot.png', { type: 'image/png' }), remove: async () => { window.__deleted++; }, requestPermission: async () => 'granted' }];
+  };
+});
+await page.evaluate(async (b64) => { window.__shot = await (await fetch('data:image/png;base64,' + b64)).blob(); }, png);
+await page.goto(base + '#/');
+await page.getByRole('link', { name: /Sparkasse Giro/ }).click();
+await page.getByRole('link', { name: 'Add screenshot' }).click();
+await page.locator('input[data-change=scan-files]').click();
+await page.getByText('Check what was read').waitFor({ timeout: 180000 });
+await page.getByRole('button', { name: /^Save/ }).click();
+await page.getByText('Delete the screenshot from your phone?').waitFor();
+await shot('15-delete-prompt');
+await page.getByRole('button', { name: 'Delete', exact: true }).click();
+await page.getByText('Deleted from your phone').waitFor();
+if (await page.evaluate(() => window.__deleted) !== 1) throw new Error('screenshot not deleted');
+step('delete the screenshot after saving');
+
 await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));
