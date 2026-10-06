@@ -297,3 +297,9 @@ a.row:active, .row a.row-main:active { background: var(--surface-2); }
 }
 .sheet .button-row { margin-top: 8px; }
 .sheet .row-title { white-space: normal; }
+.note.ok svg { color: var(--pos); }
+.find-link { gap: 12px; color: var(--ink); }
+.find-link > svg:first-child { color: var(--accent); }
+.find-account-link { display: inline-flex; align-items: center; gap: 6px; margin-top: -4px; }
+.row-end .button.small { min-height: 34px; padding: 0 12px; }
+.compare .amount-input { width: 130px; text-align: right; font-weight: 600; }

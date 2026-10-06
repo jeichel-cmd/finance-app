@@ -148,3 +148,31 @@ test('linking picks up the other side when it is already there', async () => {
   assert.equal(s.transactions.length, 7);
   assert.equal(periodSummary(s, monthStart(T), T).income, 0);
 });
+
+test('finds what is missing, extra or different between a screenshot and the app', async () => {
+  const { reconcile } = await import('../src/model.js');
+  const s = emptyState();
+  s.accounts.push({ id: 'b', name: 'DKB', kind: 'bank' });
+  const add = (id, amount, payee, date, extra = {}) => s.transactions.push({ id, accountId: 'b', amount, payee, date, category: null, ...extra });
+  add('o', 100000, 'Starting balance', '2026-09-01', { source: 'opening' });
+  add('r1', -4217, 'REWE', '2026-10-02');
+  add('x1', -2000, 'Bäcker', '2026-10-03'); // not on the screenshot
+  add('s1', -1299, 'Spotify', '2026-10-04'); // on the screenshot as 12.99 → 9.99? no: different amount below
+  add('old', -500, 'Kiosk', '2026-09-20'); // before the screenshot window
+  const shot = {
+    balance: 100000 - 4217 - 999 - 3000 - 500,
+    date: '2026-10-05',
+    rows: [
+      { id: 'a', payee: 'REWE Markt', amount: -4217, date: '2026-10-02' },
+      { id: 'b', payee: 'Spotify AB', amount: -999, date: '2026-10-04' },
+      { id: 'c', payee: 'Lieferando', amount: -3000, date: '2026-10-05' },
+    ],
+  };
+  const r = reconcile(s, 'b', shot);
+  assert.deepEqual(r.missing.map((x) => x.id), ['c']);
+  assert.deepEqual(r.extra.map((x) => x.tx.id), ['x1']);
+  assert.equal(r.different[0].tx.id, 's1');
+  assert.equal(r.different[0].delta, 300);
+  assert.equal(r.diff, -3000 + 2000 + 300);
+  assert.equal(r.rest, 0);
+});

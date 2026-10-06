@@ -267,6 +267,46 @@ export function unlinkTransfer(state, tx) {
   else delete other.transferId;
 }
 
+// ---------- find the difference: one screenshot (balance + latest payments) against the app ----------
+
+// shot: { balance (cents or null), date (ISO, the balance's date), rows: [{ id, payee, amount, date, dateGuessed }] }.
+// Returns what's missing, extra or different, and how much of the difference that explains.
+export function reconcile(state, accountId, shot) {
+  const rows = shot.rows || [];
+  const from = rows.reduce((m, r) => (r.date < m ? r.date : m), shot.date);
+  const txs = state.transactions.filter((t) => t.accountId === accountId && countsOnBalance(t) && t.source !== 'opening');
+  const used = new Set();
+  const take = (t) => { used.add(t.id); return t; };
+  const near = (t, r, days) => Math.abs(daysBetween(t.date, r.date)) <= (r.dateGuessed ? Math.max(days, 10) : days);
+  const matched = [], missing = [], different = [];
+  const pending = [];
+  // Exact matches first, so a looser rule can't steal one.
+  for (const r of rows) {
+    const t = txs.find((x) => !used.has(x.id) && x.amount === r.amount && near(x, r, 3) && samePayee(x.payee, r.payee));
+    if (t) matched.push({ row: r, tx: take(t) }); else pending.push(r);
+  }
+  for (const r of pending) {
+    const t = txs.find((x) => !used.has(x.id) && x.amount === r.amount && near(x, r, 5));
+    if (t) { matched.push({ row: r, tx: take(t) }); continue; }
+    const d = txs.find((x) => !used.has(x.id) && Math.sign(x.amount) === Math.sign(r.amount) && near(x, r, 3) &&
+      normalizePayee(x.payee) && normalizePayee(r.payee) && samePayee(x.payee, r.payee));
+    if (d) different.push({ row: r, tx: take(d), delta: r.amount - d.amount });
+    else missing.push(r);
+  }
+  const extra = txs
+    .filter((t) => !used.has(t.id) && t.date >= from && t.date <= shot.date)
+    .map((t) => ({ tx: t, edge: t.date === from })) // on the oldest day shown, it may just be scrolled off
+    .sort((a, b) => (a.tx.date < b.tx.date ? 1 : -1));
+  const app = accountBalance(state, accountId, shot.date);
+  const diff = shot.balance == null ? null : shot.balance - app;
+  const explained = missing.reduce((s, r) => s + r.amount, 0)
+    - extra.filter((e) => !e.edge).reduce((s, e) => s + e.tx.amount, 0)
+    + different.reduce((s, d) => s + d.delta, 0);
+  const edgeTotal = -extra.filter((e) => e.edge).reduce((s, e) => s + e.tx.amount, 0);
+  const rest = diff == null ? null : diff - explained;
+  return { from, app, diff, matched, missing, extra, different, explained, rest, restWithEdge: rest == null ? null : rest - edgeTotal };
+}
+
 // For a bank debit to PayPal, the PayPal payment it paid for.
 export function payPalMatch(state, tx) {
   if (!isPayPalPayee(tx.payee) || tx.amount >= 0) return null;

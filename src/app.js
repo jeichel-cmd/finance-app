@@ -7,7 +7,7 @@ import {
   changeSince, periodSummary, monthlySpending, spendingInsight, categorySuggestions, uncategorisedCount,
   findExisting, payPalMatch, checkDiff, openChecks, accountStatus, fixSuggestions, correctionTx, refreshChecks,
   countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
-  monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer,
+  monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer, reconcile,
 } from './model.js';
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc, setMoneyHidden } from './format.js';
 import { lineChart, barChart } from './charts.js';
@@ -374,6 +374,7 @@ function viewAccount(id) {
       <a class="button primary" href="#/scan?account=${esc(acc.id)}">Add screenshot</a>
       <a class="button secondary" href="#/tx/new?account=${esc(acc.id)}">Add by hand</a>
     </div>
+    <a class="link small find-account-link" href="#/scan?account=${esc(acc.id)}&mode=find">${icons.search}<span>Find a difference with a screenshot</span></a>
     <section>
       <div class="section-head"><h2>Transactions</h2></div>
       ${txs.length ? groupByDate(txs).map((g) => `<div class="date-head">${esc(dateLabel(g.date))}</div><div class="list">${g.txs.map((x) => txRow(x)).join('')}</div>`).join('') : '<p class="muted">No transactions yet.</p>'}
@@ -511,6 +512,14 @@ function viewScan(accountId, mode) {
     </label>
     <button class="button plain small paste-button" data-action="paste-shot" data-mode="${m}" data-account="${esc(accountId || '')}">Paste a copied screenshot</button>`;
   const pasteTip = `<p class="small muted">Tip, so screenshots don't pile up in your photos: on iPhone, tap the screenshot preview, then Done, then <b>Copy and Delete</b>, and paste it here.</p>`;
+  if (mode === 'find') {
+    return `<main class="page narrow">
+      ${backBar(acc ? `#/account/${esc(acc.id)}` : '#/scan', '')}
+      <h1 class="page-title">Find a difference${acc ? ` in ${esc(acc.name)}` : ''}</h1>
+      <p class="muted">A screenshot with the balance and the latest payments of one account. The app compares it with what's saved and shows what's missing, extra or different. Nothing is saved until you choose.</p>
+      ${picker('find', icons.search, 'Choose screenshot', 'Balance and latest payments on one screen, or several screenshots of one list')}
+    </main>`;
+  }
   if (acc || mode === 'payments') {
     return `<main class="page narrow">
       ${backBar(acc ? `#/account/${esc(acc.id)}` : '#/scan', '')}
@@ -526,6 +535,7 @@ function viewScan(accountId, mode) {
     <p class="muted">What does your screenshot show? It's read on this phone and isn't stored or uploaded.</p>
     ${picker('balances', icons.wallet, 'Balances', 'An overview with one or more accounts and their balances. Updates those balances.')}
     ${picker('payments', icons.list, 'Payments', 'The list of payments in one account. Adds the new ones to that account.')}
+    <a class="row card find-link" href="#/scan?mode=find">${icons.search}<span class="row-main"><span class="row-title">Find a difference</span><span class="row-sub">An account doesn't match? Compare a screenshot with the app.</span></span>${icons.chevron}</a>
     <p class="small muted">Light or dark mode both work, and cropping isn't needed. You'll check everything before it's saved.</p>
     ${pasteTip}
   </main>`;
@@ -533,7 +543,7 @@ function viewScan(accountId, mode) {
 
 async function startScan(files, accountId, mode) {
   scanning = { label: 'Loading the reader', progress: 0 };
-  go('#/scan' + (accountId ? `?account=${accountId}` : `?mode=${mode}`));
+  go('#/scan?' + new URLSearchParams({ ...(accountId ? { account: accountId } : {}), ...(mode && (mode !== 'payments' || !accountId) ? { mode } : {}) }));
   const all = [];
   try {
     for (let i = 0; i < files.length; i++) {
@@ -556,7 +566,14 @@ async function startScan(files, accountId, mode) {
     return;
   }
   scanning = null;
-  draft = mode === 'balances' ? buildBalanceDraft(parseBalances(all)) : buildDraft(parseScreenshot(all, today()), accountId);
+  if (mode === 'balances') draft = buildBalanceDraft(parseBalances(all));
+  else {
+    draft = buildDraft(parseScreenshot(all, today()), accountId);
+    if (mode === 'find') {
+      draft.mode = 'find';
+      if (draft.account === 'new') draft.account = state.accounts[0]?.id || 'new';
+    }
+  }
   go('#/review');
 }
 
@@ -756,6 +773,58 @@ function buildDraft(parsed, accountId) {
   return d;
 }
 
+function viewFind() {
+  const d = draft;
+  const acc = accountById(d.account);
+  if (!acc) return `<main class="page narrow">${backBar('#/scan')}<p class="muted">Add the account first, then compare a screenshot with it.</p></main>`;
+  const c = cur(acc);
+  const r = reconcile(state, acc.id, { balance: d.balance, date: d.balanceDate, rows: d.rows });
+  const rowLine = (x, extra = '') => `<span class="row-main"><span class="row-title">${esc(x.payee || 'No description')}</span><span class="row-sub"><span>${esc(dateLabel(x.date))}</span>${extra}</span></span>`;
+  const fixable = r.missing.length + r.different.length + r.extra.filter((e) => !e.edge).length;
+  const section = (title, hint, items) => items.length ? `<section><div class="section-head"><h2>${title}</h2></div><p class="small muted">${hint}</p><div class="list">${items.join('')}</div></section>` : '';
+  const missing = r.missing.map((x) => `<div class="row">${rowLine(x)}<span class="row-end"><span class="amount ${signedClass(x.amount)}">${money(x.amount, { sign: true, ...c })}</span><button class="button primary small" data-action="find-add" data-row="${esc(x.id)}">Add</button></span></div>`);
+  const extra = r.extra.map((e) => `<div class="row">${rowLine(e.tx, e.edge ? '<span>maybe just above the screenshot</span>' : '')}<span class="row-end"><span class="amount ${signedClass(e.tx.amount)}">${money(e.tx.amount, { sign: true, ...c })}</span><button class="button ${e.edge ? 'plain' : 'secondary'} small" data-action="find-remove" data-tx="${esc(e.tx.id)}">Remove</button></span></div>`);
+  const different = r.different.map((x) => `<div class="row">${rowLine(x.tx, `<span>app ${money(x.tx.amount, c)}, screenshot ${money(x.row.amount, c)}</span>`)}<span class="row-end"><button class="button primary small" data-action="find-amount" data-tx="${esc(x.tx.id)}" data-row="${esc(x.row.id)}">Use ${money(x.row.amount, c)}</button></span></div>`);
+  let verdict = '';
+  if (r.diff === 0) verdict = `<p class="note ok">${icons.check}<span>The app matches the screenshot.</span></p>`;
+  else if (r.diff != null && r.rest === 0) verdict = `<p class="note ok">${icons.check}<span>These explain the whole difference.</span></p>`;
+  else if (r.diff != null && r.restWithEdge === 0) verdict = `<p class="note">${icons.spark}<span>These explain it if the entries marked "maybe just above the screenshot" really aren't in the account.</span></p>`;
+  else if (r.diff != null) verdict = `<p class="note">${icons.warn}<span>${money(r.rest, { sign: true, ...c })} ${fixable ? 'is still unexplained after these' : "can't be explained by this screenshot"}. It comes from before ${esc(dateLabel(r.from))}: add a screenshot that goes further back, or set the balance.</span></p>`;
+  return `<main class="page">
+    ${backBar(`#/account/${esc(acc.id)}`, 'Find a difference')}
+    <label class="field">Account<select data-change="find-account">${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === acc.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
+    <div class="card compare">
+      <div><span class="muted">Screenshot, ${esc(dateLabel(d.balanceDate))}</span><span class="amount"><input class="input amount-input" data-change="find-balance" inputmode="decimal" value="${d.balance == null ? '' : esc(typedValue(d.balance))}" placeholder="Balance" aria-label="Balance on the screenshot"></span></div>
+      <div><span class="muted">In the app</span><span class="amount">${money(r.app, c)}</span></div>
+      ${r.diff == null ? '' : `<div class="total"><span>Difference</span><span class="amount ${r.diff ? 'warn-text' : ''}">${money(r.diff, { sign: true, ...c })}</span></div>`}
+    </div>
+    <p class="small muted">Compared ${d.rows.length} payment${d.rows.length === 1 ? '' : 's'} from ${esc(dateLabel(r.from))} on: ${r.matched.length} already in the app.</p>
+    ${verdict}
+    ${section('Missing in the app', 'On the screenshot but not saved.', missing)}
+    ${section('Not on the screenshot', 'Saved in the app but not on the screenshot. Maybe saved twice, or it never happened.', extra)}
+    ${section('Different amount', 'Saved with another amount than on the screenshot.', different)}
+    <section class="stack">
+      ${fixable > 1 ? `<button class="button primary wide" data-action="find-all">Fix all ${fixable}</button>` : ''}
+      ${r.diff && r.rest ? `<button class="button secondary wide" data-action="find-done" data-correct="1">Set the balance to ${money(d.balance, c)}</button>` : ''}
+      <button class="button ${fixable > 1 ? 'plain' : 'secondary'} wide" data-action="find-done">Done</button>
+    </section>
+    <details><summary class="small muted">Show the text that was read</summary><pre>${esc(d.text || '')}</pre></details>
+  </main>`;
+}
+
+function findRow(id) {
+  return draft.rows.find((r) => r.id === id);
+}
+
+function findAdd(row, acc) {
+  state.transactions.push({ id: uid(), accountId: acc.id, date: row.date, payee: row.payee, amount: row.amount, category: suggestCategory(row.payee, row.amount, state.rules, acc), source: 'scan', createdAt: new Date().toISOString() });
+}
+
+function findRemove(tx) {
+  unlinkTransfer(state, tx);
+  state.transactions = state.transactions.filter((t) => t !== tx);
+}
+
 function draftAccount(d) {
   if (d.account === 'new') return { id: null, name: d.newName, kind: d.newKind, currency: d.newCurrency, fundedFrom: d.newKind === 'wallet' ? state.accounts.find((a) => a.kind === 'bank')?.id || null : null };
   return accountById(d.account);
@@ -778,6 +847,7 @@ function applyAccountToDraft(d) {
 function viewReview() {
   if (!draft) return viewScan();
   if (draft.mode === 'balances') return viewBalanceReview();
+  if (draft.mode === 'find') return viewFind();
   const d = draft;
   const acc = draftAccount(d);
   const bank = acc?.kind === 'wallet' ? (acc.fundedFrom ? accountById(acc.fundedFrom) : null) : null;
@@ -905,7 +975,7 @@ function viewFix(id) {
     ${accountsList}
     <section class="stack">
       ${acc ? `<a class="button secondary wide" href="#/tx/new?account=${esc(acc.id)}&amount=${diff}&check=${esc(check.id)}">Add a missing transaction</a>
-      <a class="button secondary wide" href="#/scan?account=${esc(acc.id)}">Add another screenshot</a>
+      <a class="button secondary wide" href="#/scan?account=${esc(acc.id)}&mode=find">Find the cause with a screenshot</a>
       <button class="button secondary wide" data-action="fix-correct" data-check="${esc(check.id)}">${investment ? 'Record as a change in value' : `Set the balance to ${money(check.balance, c)}`}</button>
       <p class="hint">${investment ? 'For investments the difference is usually the market moving. It is recorded as a value change, not as spending.' : `Adds a correction of ${money(diff, { sign: true, ...c })} that isn't counted as spending. Use it when you can't find the cause.`}</p>` : ''}
       <button class="button plain wide" data-action="fix-ignore" data-check="${esc(check.id)}">Ignore this time</button>
@@ -1320,6 +1390,38 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  'find-add'(el) {
+    findAdd(findRow(el.dataset.row), accountById(draft.account));
+    commit();
+  },
+  'find-remove'(el) {
+    findRemove(state.transactions.find((t) => t.id === el.dataset.tx));
+    commit();
+  },
+  'find-amount'(el) {
+    state.transactions.find((t) => t.id === el.dataset.tx).amount = findRow(el.dataset.row).amount;
+    commit();
+  },
+  'find-all'() {
+    const acc = accountById(draft.account);
+    const r = reconcile(state, acc.id, { balance: draft.balance, date: draft.balanceDate, rows: draft.rows });
+    for (const x of r.missing) findAdd(x, acc);
+    for (const e of r.extra) if (!e.edge) findRemove(e.tx);
+    for (const x of r.different) x.tx.amount = x.row.amount;
+    commit();
+  },
+  'find-done'(el) {
+    const acc = accountById(draft.account);
+    const d = draft;
+    draft = null;
+    if (d.balance == null) { commit({ rerender: false }); go(`#/account/${acc.id}`); return; }
+    const { check, status } = recordBalance(acc, d.balance, d.balanceDate, { fresh: false });
+    if (status === 'open' && el.dataset.correct) { state.transactions.push(correctionTx(state, check)); check.status = 'fixed'; }
+    commit({ rerender: false });
+    if (status === 'open' && !el.dataset.correct) { go(`#/fix/${check.id}`); return; }
+    toast(`${acc.name} matches the screenshot.`);
+    go(`#/account/${acc.id}`);
+  },
   async 'paste-shot'(el) {
     let images = [];
     try {
@@ -1524,6 +1626,14 @@ const changes = {
   },
   touch(el) {
     el.dataset.touched = '1';
+  },
+  'find-account'(el) {
+    draft.account = el.value;
+    render();
+  },
+  'find-balance'(el) {
+    draft.balance = el.value.trim() ? parseTyped(el.value) : null;
+    render();
   },
   'tx-category'(el) {
     el.dataset.touched = '1';

@@ -48,6 +48,18 @@ const bankShot = await drawScreenshot('bank', `
   <div class="r"><span>Miete Oktober</span><span>-820,00 €</span></div>
   <div class="r"><span>Gehalt</span><span>+3.120,00 €</span></div>`);
 
+// The same account later: Lieferando isn't there, a cinema payment is new.
+const findShot = await drawScreenshot('find', `
+  <div class="h">Sparkasse</div><div class="b">Girokonto</div><div class="b">Kontostand</div><div class="big">2.356,64 €</div>
+  <div class="d">Heute</div>
+  <div class="r"><span>REWE Markt GmbH</span><span>-42,17 €</span></div>
+  <div class="d">Gestern</div>
+  <div class="r"><span>PayPal Europe</span><span>-10,99 €</span></div>
+  <div class="r"><span>Kino Ulm</span><span>-15,00 €</span></div>
+  <div class="d">01.10.2026</div>
+  <div class="r"><span>Miete Oktober</span><span>-820,00 €</span></div>
+  <div class="r"><span>Gehalt</span><span>+3.120,00 €</span></div>`);
+
 const paypalShot = await drawScreenshot('paypal', `
   <div class="h">PayPal</div><div class="b">PayPal balance</div><div class="big">€63.50</div>
   <div class="d">Recent activity</div>
@@ -302,6 +314,24 @@ await page.getByRole('button', { name: 'Delete', exact: true }).click();
 await page.getByText('Deleted from your phone').waitFor();
 if (await page.evaluate(() => window.__deleted) !== 1) throw new Error('screenshot not deleted');
 step('delete the screenshot after saving');
+
+// Find a difference: the app shows what's missing, extra or different and fixes it.
+await page.goto(base + '#/');
+await page.getByRole('link', { name: /Sparkasse Giro doesn't match/ }).click();
+await page.getByRole('link', { name: 'Find the cause with a screenshot' }).click();
+await page.evaluate(() => { delete window.showOpenFilePicker; });
+await page.locator('input[data-change=scan-files]').setInputFiles(findShot);
+await page.getByRole('heading', { name: 'Missing in the app' }).waitFor({ timeout: 180000 });
+const findText = await page.locator('main').innerText();
+await shot('16-find');
+if (!/Kino/.test(findText)) throw new Error('missing payment not found');
+if (!/Not on the screenshot[\s\S]*Lieferando/i.test(findText)) throw new Error('extra payment not found');
+if (!/These explain the whole difference/.test(findText)) throw new Error('difference not explained:\n' + findText);
+await page.getByRole('button', { name: /^Fix all/ }).click();
+await page.getByText('The app matches the screenshot').waitFor();
+await page.getByRole('button', { name: 'Done' }).click();
+await page.getByText('Sparkasse Giro matches the screenshot').waitFor();
+step('find a difference');
 
 await browser.close();
 server.close();
