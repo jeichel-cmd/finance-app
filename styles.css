@@ -303,3 +303,5 @@ a.row:active, .row a.row-main:active { background: var(--surface-2); }
 .find-account-link { display: inline-flex; align-items: center; gap: 6px; margin-top: -4px; }
 .row-end .button.small { min-height: 34px; padding: 0 12px; }
 .compare .amount-input { width: 130px; text-align: right; font-weight: 600; }
+.note.question { align-items: center; border: 1px solid var(--accent-soft); color: var(--ink); }
+.note.question .row-main { flex: 1; }

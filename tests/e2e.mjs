@@ -333,6 +333,38 @@ await page.getByRole('button', { name: 'Done' }).click();
 await page.getByText('Sparkasse Giro matches the screenshot').waitFor();
 step('find a difference');
 
+// A bank debit that only says "PayPal": the app asks what it was for.
+await page.goto(base + '#/');
+await page.locator('a.row', { hasText: 'Sparkasse Giro' }).first().click();
+await page.getByRole('link', { name: 'Add by hand' }).click();
+await page.getByLabel('Amount').fill('40');
+await page.getByLabel('Description').fill('PayPal Europe S.a.r.l.');
+await page.getByRole('button', { name: 'Add', exact: true }).click();
+await page.goto(base + '#/spending');
+const spentBefore = await page.locator('.card .mid-number').first().textContent();
+await page.goto(base + '#/');
+await page.getByRole('link', { name: /What was this PayPal payment for/ }).click();
+await page.getByLabel('What was it for?').fill('Zalando');
+if (await page.getByLabel('Category').inputValue() !== 'shopping') throw new Error('no category suggested for Zalando');
+await shot('17-paypal-question');
+await page.getByRole('button', { name: 'Save', exact: true }).click();
+await page.getByText('All clear').waitFor();
+await page.goto(base + '#/spending');
+const spentAfter = await page.locator('.card .mid-number').first().textContent();
+const eur = (x) => Number(x.replace(/[^\d.]/g, ''));
+if (Math.round((eur(spentAfter) - eur(spentBefore)) * 100) !== 4000) throw new Error(`PayPal answer not counted: ${spentBefore} → ${spentAfter}`);
+step('ask about a PayPal debit');
+
+// Mark a transaction as repeating: it shows up in Plan.
+await page.goto(base + '#/');
+await page.locator('a.row', { hasText: 'Sparkasse Giro' }).first().click();
+await page.getByRole('link', { name: /Miete Oktober/ }).click();
+await page.getByLabel('Repeats').selectOption('monthly');
+await page.getByRole('button', { name: 'Save', exact: true }).click();
+await page.goto(base + '#/plan');
+await page.getByText('Miete Oktober').first().waitFor();
+step('repeating transaction in the plan');
+
 await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));

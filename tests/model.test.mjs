@@ -176,3 +176,25 @@ test('finds what is missing, extra or different between a screenshot and the app
   assert.equal(r.diff, -3000 + 2000 + 300);
   assert.equal(r.rest, 0);
 });
+
+test('a transaction marked as repeating becomes a plan due next after today', async () => {
+  const { planFromTx } = await import('../src/model.js');
+  const p = planFromTx({ id: 't', accountId: 'b', payee: 'HUK Autoversicherung', amount: -48000, date: '2026-01-10', category: 'insurance' }, 'yearly', '2026-10-07');
+  assert.equal(p.due, '2027-01-10');
+  assert.equal(p.fromTx, 't');
+  assert.equal(planFromTx({ id: 'm', date: '2026-09-15', amount: -999 }, 'monthly', '2026-10-07').due, '2026-10-15');
+});
+
+test('asks about bank PayPal debits it cannot explain, and counts an answered one once', async () => {
+  const { unclearPayPal } = await import('../src/model.js');
+  const s = setup();
+  s.transactions.push({ id: 'b9', accountId: 'bank', amount: -4000, payee: 'PayPal Europe', category: 'transfer', date: T });
+  assert.deepEqual(unclearPayPal(s).map((t) => t.id), ['b9']); // b1 is explained by the Spotify payment in PayPal
+  const before = periodSummary(s, monthStart(T), T).spent;
+  Object.assign(s.transactions.at(-1), { paypalFor: 'Zalando', payee: 'PayPal · Zalando', category: 'shopping' });
+  assert.equal(unclearPayPal(s).length, 0);
+  assert.equal(periodSummary(s, monthStart(T), T).spent, before + 4000);
+  // Later the PayPal side arrives: still counted once.
+  s.transactions.push({ id: 'p9', accountId: 'pp', amount: -4000, payee: 'Zalando', category: 'shopping', paidFrom: 'bank', date: T });
+  assert.equal(periodSummary(s, monthStart(T), T).spent, before + 4000);
+});

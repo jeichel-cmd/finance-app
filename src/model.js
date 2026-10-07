@@ -131,6 +131,8 @@ export function periodSummary(state, from, to) {
   const accounts = new Map(state.accounts.map((a) => [a.id, a]));
   for (const t of state.transactions) {
     if (t.date < from || t.date > to) continue;
+    // Said what a bank PayPal debit was for, then the PayPal payment itself was saved too: count it once, in PayPal.
+    if (t.paypalFor && payPalMatch(state, t)) continue;
     const acc = accounts.get(t.accountId);
     const amount = Math.round(toEur(state, t.amount, currencyOf(acc)) * shareOf(acc));
     const kind = txKind(state, t);
@@ -307,6 +309,14 @@ export function reconcile(state, accountId, shot) {
   return { from, app, diff, matched, missing, extra, different, explained, rest, restWithEdge: rest == null ? null : rest - edgeTotal };
 }
 
+// Bank debits to PayPal with nothing saying what they paid for: no matching PayPal payment and no answer yet.
+export function unclearPayPal(state) {
+  const banks = new Set(state.accounts.filter((a) => a.kind === 'bank').map((a) => a.id));
+  return state.transactions
+    .filter((t) => banks.has(t.accountId) && t.amount < 0 && t.category === 'transfer' && !t.transferId && t.paypalFor == null && isPayPalPayee(t.payee) && !payPalMatch(state, t))
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
 // For a bank debit to PayPal, the PayPal payment it paid for.
 export function payPalMatch(state, tx) {
   if (!isPayPalPayee(tx.payee) || tx.amount >= 0) return null;
@@ -451,10 +461,25 @@ export function occurrences(plan, from, to) {
   return dates;
 }
 
-function addMonthsKeepDay(date, n) {
+export function addMonthsKeepDay(date, n) {
   const start = addMonths(date, n);
   const day = Math.min(Number(date.slice(8)), Number(monthEnd(start).slice(8)));
   return start.slice(0, 8) + String(day).padStart(2, '0');
+}
+
+// A planned payment from a transaction the person marked as repeating; due next after today.
+export function planFromTx(tx, frequency, from = today()) {
+  const step = FREQUENCIES[frequency].months;
+  let due = tx.date;
+  for (let i = 1; due <= from && i < 600; i++) due = addMonthsKeepDay(tx.date, step * i);
+  return { name: tx.payee, amount: tx.amount, frequency, due, accountId: tx.accountId, category: tx.category || null, fromTx: tx.id };
+}
+
+// The plan that came from (or matches) a transaction.
+export function planForTx(state, tx) {
+  return (state.plans || []).find((p) => p.fromTx === tx.id)
+    || (state.plans || []).find((p) => !p.fromTx && p.accountId === tx.accountId && normalizePayee(p.name) && normalizePayee(p.name) === normalizePayee(tx.payee))
+    || null;
 }
 
 // The next `months` months with what's planned in each.

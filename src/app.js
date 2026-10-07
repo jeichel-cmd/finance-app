@@ -7,7 +7,7 @@ import {
   changeSince, periodSummary, monthlySpending, spendingInsight, categorySuggestions, uncategorisedCount,
   findExisting, payPalMatch, checkDiff, openChecks, accountStatus, fixSuggestions, correctionTx, refreshChecks,
   countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
-  monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer, reconcile,
+  monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer, reconcile, planFromTx, planForTx, unclearPayPal,
 } from './model.js';
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc, setMoneyHidden } from './format.js';
 import { lineChart, barChart } from './charts.js';
@@ -69,6 +69,7 @@ function render() {
     case 'category': return paint(viewCategory(id, r.q.get('p') || 'month'), { tabs: true, active: 'spending' });
     case 'scan': return paint(viewScan(r.q.get('account'), r.q.get('mode')), { tabs: true, active: 'scan' });
     case 'plan': return paint(viewPlan(), { tabs: true, active: 'plan' });
+    case 'paypal': return paint(viewPayPalQuestions());
     case 'plan-edit': return paint(viewPlanEdit(id, r.q));
     case 'review': return paint(viewReview());
     case 'fix': return paint(viewFix(id));
@@ -325,6 +326,7 @@ function viewOverview() {
       ${lineChart(netWorthSeries(state, 6))}
     </section>
     ${banners}
+    ${(() => { const n = unclearPayPal(state).length; return n ? `<a class="note question" href="#/paypal">${icons.spark}<span class="row-main"><span class="row-title">What ${n === 1 ? 'was this PayPal payment' : `were these ${n} PayPal payments`} for?</span><span class="row-sub">Your bank only shows "PayPal". Tell the app, so your spending is right.</span></span>${icons.chevron}</a>` : ''; })()}
     <section>
       <div class="section-head"><h2>Accounts</h2><a class="link" href="#/account-edit/new">${icons.plus}<span>Add</span></a></div>
       <div class="list">
@@ -773,6 +775,22 @@ function buildDraft(parsed, accountId) {
   return d;
 }
 
+function viewPayPalQuestions() {
+  const list = unclearPayPal(state);
+  const pp = state.accounts.find((a) => a.kind === 'wallet' && /pay\s?pal/i.test(a.name));
+  return `<main class="page">
+    ${backBar('#/', 'PayPal payments')}
+    <p class="muted">Your bank only shows "PayPal" for these. Say what each one was for and it counts as spending in that category. If it just topped up your PayPal balance, it stays a transfer.</p>
+    ${pp ? '' : '<p class="small muted">Tip: add a PayPal screenshot too, then the app matches these by itself.</p>'}
+    ${list.length ? list.map((t) => `<form class="card stack" data-form="paypal-for" data-id="${esc(t.id)}">
+      <div class="cat-line"><span><span class="row-title">${esc(accountById(t.accountId)?.name || '')}</span><span class="small muted"> · ${esc(dateLabel(t.date))}</span></span><span class="amount">${money(t.amount, { sign: true, ...cur(accountById(t.accountId)) })}</span></div>
+      <label class="field">What was it for?<input name="what" placeholder="e.g. Zalando order" data-input="paypal-what" required></label>
+      <label class="field">Category<select name="category" data-change="touch">${categoryOptions(null)}</select></label>
+      <div class="button-row"><button class="button plain" type="button" data-action="paypal-topup" data-id="${esc(t.id)}">Just a top-up</button><button class="button primary" type="submit">Save</button></div>
+    </form>`).join('') : `<section class="empty"><div class="empty-icon ok">${icons.check}</div><h1>All clear</h1><p class="muted">Every PayPal payment from your bank is accounted for.</p><a class="button primary" href="#/">Done</a></section>`}
+  </main>`;
+}
+
 function viewFind() {
   const d = draft;
   const acc = accountById(d.account);
@@ -1000,6 +1018,7 @@ function viewTx(id, q) {
   const back = q.get('check') ? `#/fix/${q.get('check')}` : acc ? `#/account/${acc.id}` : '#/';
   const out = isNew ? !(t.amount > 0) : t.amount < 0;
   const partner = isNew ? null : transferPartner(state, t);
+  const plan = isNew ? null : planForTx(state, t);
   const isTransfer = t.category === 'transfer';
   return `<main class="page">
     ${backBar(back, isNew ? 'Add transaction' : 'Transaction')}
@@ -1020,6 +1039,11 @@ function viewTx(id, q) {
         <span class="hint">The app adds the other side there for you, so you enter the move once. Own transfers never count as money in or out.</span></label>
       ${bank ? `<label class="inline-check"><input type="checkbox" name="paidFrom" ${t.paidFrom || (isNew && out) ? 'checked' : ''}>Paid from ${esc(bank.name)} (doesn't change the ${esc(acc.name)} balance)</label>` : ''}
       ${match ? `<p class="note">This bank debit paid for ${esc(match.payee)} in ${esc(accountById(match.accountId)?.name || 'PayPal')}, so it counts as a transfer, not spending.</p>` : ''}
+      <label class="field">Repeats<select name="repeats">
+        <option value="">Doesn't repeat</option>
+        ${Object.entries(FREQUENCIES).filter(([k]) => k !== 'once').map(([k, v]) => `<option value="${k}" ${plan?.frequency === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}
+      </select>${plan ? `<span class="hint">In your plan, next on ${esc(dateLabel(plan.due))}.</span>` : '<span class="hint">Repeating payments show up in Plan, so you can see them coming.</span>'}</label>
+      ${!isNew && unclearPayPal(state).includes(t) ? `<a class="note question" href="#/paypal">${icons.spark}<span>What was this PayPal payment for? Tell the app so it counts in the right category.</span></a>` : ''}
       <label class="field">Note<input name="note" value="${esc(t.note || '')}" placeholder="Optional"></label>
       <button class="button primary" type="submit">${isNew ? 'Add' : 'Save'}</button>
       ${isNew ? '' : `<button class="button danger" type="button" data-action="delete-tx" data-id="${esc(id)}">Delete</button>`}
@@ -1315,6 +1339,13 @@ const forms = {
       const other = linkTransfer(state, t, transferTo);
       toast(`Saved. ${accountById(other.accountId)?.name} has the other side.`);
     } else if (t.transferId) unlinkTransfer(state, t);
+    const repeats = f.get('repeats');
+    const existingPlan = planForTx(state, t);
+    if (repeats) {
+      const fresh = planFromTx(t, repeats);
+      if (existingPlan) Object.assign(existingPlan, { amount: fresh.amount, frequency: repeats, due: existingPlan.frequency === repeats && existingPlan.due > today() ? existingPlan.due : fresh.due });
+      else state.plans.push({ id: uid(), note: '', createdAt: new Date().toISOString(), ...fresh });
+    } else if (existingPlan?.fromTx === t.id) state.plans = state.plans.filter((p) => p !== existingPlan);
     if (form.querySelector('[name=category]').dataset.touched && fields.category) learn(state.rules, fields.payee, fields.category);
     commit({ rerender: false });
     const check = form.dataset.check;
@@ -1328,6 +1359,16 @@ const forms = {
     if (bio) { bio = null; await store.clearBio(); }
     toast('Passcode changed. Older backups still open with the old passcode.');
     render();
+  },
+  'paypal-for'(f, form) {
+    const t = state.transactions.find((x) => x.id === form.dataset.id);
+    const what = f.get('what').trim();
+    if (!what) return;
+    const cat = f.get('category') || suggestCategory(what, t.amount, state.rules) || null;
+    Object.assign(t, { paypalFor: what, payee: `PayPal · ${what}`, category: cat });
+    if (cat) learn(state.rules, what, cat);
+    toast(cat ? `Counted as ${catName(cat)}.` : 'Saved. Pick a category later in Spending.');
+    commit();
   },
   plan(f, form) {
     const id = form.dataset.id;
@@ -1390,6 +1431,11 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  'paypal-topup'(el) {
+    const t = state.transactions.find((x) => x.id === el.dataset.id);
+    t.paypalFor = '';
+    commit();
+  },
   'find-add'(el) {
     findAdd(findRow(el.dataset.row), accountById(draft.account));
     commit();
@@ -1719,6 +1765,10 @@ document.addEventListener('input', (e) => {
     const acc = accountById(el.form.querySelector('[name=accountId]').value);
     const out = el.form.querySelector('[name=dir]:checked')?.value === 'out';
     sel.value = suggestCategory(el.value, out ? -1 : 1, state.rules, acc) || '';
+  }
+  if (el.dataset.input === 'paypal-what') {
+    const sel = el.form.querySelector('[name=category]');
+    if (!sel.dataset.touched) sel.value = suggestCategory(el.value, -1, state.rules) || '';
   }
 });
 
