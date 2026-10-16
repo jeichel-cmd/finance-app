@@ -365,6 +365,20 @@ await page.goto(base + '#/plan');
 await page.getByText('Miete Oktober').first().waitFor();
 step('repeating transaction in the plan');
 
+// Leave a transaction out of spending.
+await page.goto(base + '#/spending');
+const spentAll = await page.locator('.card .mid-number').first().textContent();
+await page.goto(base + '#/');
+await page.locator('a.row', { hasText: 'Sparkasse Giro' }).first().click();
+await page.getByRole('link', { name: /REWE Markt/ }).first().click();
+await page.getByLabel('Count in spending and income').uncheck();
+await page.getByRole('button', { name: 'Save', exact: true }).click();
+await page.getByText('not counted').first().waitFor();
+await page.goto(base + '#/spending');
+const spentLess = await page.locator('.card .mid-number').first().textContent();
+if (Math.round((eur(spentAll) - eur(spentLess)) * 100) !== 4217) throw new Error(`not excluded: ${spentAll} → ${spentLess}`);
+step('transaction not counted');
+
 await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));

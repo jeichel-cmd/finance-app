@@ -186,6 +186,7 @@ function txRow(t, { showAccount = false } = {}) {
     showAccount && acc ? `<span>${esc(acc.name)}</span>` : '',
     paidFrom ? `<span>paid from ${esc(paidFrom.name)}</span>` : '',
     match ? `<span>for ${esc(match.payee)} in ${esc(accountById(match.accountId)?.name || 'PayPal')}</span>` : '',
+    t.excluded ? '<span>not counted</span>' : '',
   ].filter(Boolean).join('');
   return `<a class="row" href="#/tx/${esc(t.id)}">
     <span class="row-main"><span class="row-title">${esc(t.payee || 'No description')}</span><span class="row-sub">${sub}</span></span>
@@ -1039,6 +1040,7 @@ function viewTx(id, q) {
         <span class="hint">The app adds the other side there for you, so you enter the move once. Own transfers never count as money in or out.</span></label>
       ${bank ? `<label class="inline-check"><input type="checkbox" name="paidFrom" ${t.paidFrom || (isNew && out) ? 'checked' : ''}>Paid from ${esc(bank.name)} (doesn't change the ${esc(acc.name)} balance)</label>` : ''}
       ${match ? `<p class="note">This bank debit paid for ${esc(match.payee)} in ${esc(accountById(match.accountId)?.name || 'PayPal')}, so it counts as a transfer, not spending.</p>` : ''}
+      <label class="inline-check"><input type="checkbox" name="counts" ${t.excluded ? '' : 'checked'}>Count in spending and income</label>
       <label class="field">Repeats<select name="repeats">
         <option value="">Doesn't repeat</option>
         ${Object.entries(FREQUENCIES).filter(([k]) => k !== 'once').map(([k, v]) => `<option value="${k}" ${plan?.frequency === k ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}
@@ -1331,6 +1333,8 @@ const forms = {
       t = state.transactions.find((x) => x.id === id);
       Object.assign(t, fields);
     }
+    if (f.get('counts')) delete t.excluded;
+    else t.excluded = true;
     if (bank && f.get('paidFrom') && amount < 0) t.paidFrom = bank.id;
     else delete t.paidFrom;
     const transferTo = fields.category === 'transfer' ? f.get('transferTo') : '';

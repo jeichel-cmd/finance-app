@@ -133,6 +133,7 @@ export function periodSummary(state, from, to) {
     if (t.date < from || t.date > to) continue;
     // Said what a bank PayPal debit was for, then the PayPal payment itself was saved too: count it once, in PayPal.
     if (t.paypalFor && payPalMatch(state, t)) continue;
+    if (t.excluded) continue; // the person chose not to count this one
     const acc = accounts.get(t.accountId);
     const amount = Math.round(toEur(state, t.amount, currencyOf(acc)) * shareOf(acc));
     const kind = txKind(state, t);

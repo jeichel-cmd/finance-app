@@ -198,3 +198,12 @@ test('asks about bank PayPal debits it cannot explain, and counts an answered on
   s.transactions.push({ id: 'p9', accountId: 'pp', amount: -4000, payee: 'Zalando', category: 'shopping', paidFrom: 'bank', date: T });
   assert.equal(periodSummary(s, monthStart(T), T).spent, before + 4000);
 });
+
+test('a transaction set not to count stays on the balance but out of spending and income', () => {
+  const s = setup();
+  const before = periodSummary(s, monthStart(T), T);
+  s.transactions.push({ id: 'big', accountId: 'bank', amount: -90000, payee: 'Laptop for work (refunded by employer)', category: 'shopping', date: T, excluded: true });
+  s.transactions.push({ id: 'in', accountId: 'bank', amount: 90000, payee: 'Employer refund', category: null, date: T, excluded: true });
+  assert.deepEqual(periodSummary(s, monthStart(T), T), before);
+  assert.equal(accountBalance(s, 'bank'), 100000 - 1099 - 4217);
+});
