@@ -379,6 +379,25 @@ const spentLess = await page.locator('.card .mid-number').first().textContent();
 if (Math.round((eur(spentAll) - eur(spentLess)) * 100) !== 4217) throw new Error(`not excluded: ${spentAll} → ${spentLess}`);
 step('transaction not counted');
 
+// Search: live results as you type, amounts too, and recent searches.
+await page.goto(base + '#/');
+await page.getByRole('link', { name: 'Search payments' }).click();
+await page.getByRole('searchbox').pressSequentially('rewe');
+await page.locator('#search-results mark', { hasText: /rewe/i }).first().waitFor();
+await page.getByRole('searchbox').fill('42,17');
+await page.getByText(/^1 payment/).waitFor();
+await page.getByRole('searchbox').fill('Gehalt');
+await page.getByText(/^1 payment/).waitFor();
+await page.getByRole('tab', { name: 'Money out' }).click();
+await page.getByText('Nothing found').waitFor();
+await page.getByRole('tab', { name: 'All' }).click();
+await shot('18-search');
+await page.locator('#search-results a.row').first().click();
+await page.goBack();
+await page.getByRole('searchbox').fill('');
+await page.getByRole('link', { name: 'Gehalt' }).waitFor();
+step('search payments');
+
 await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));

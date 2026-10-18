@@ -318,6 +318,35 @@ export function unclearPayPal(state) {
     .sort((a, b) => b.date.localeCompare(a.date));
 }
 
+// ---------- search ----------
+
+export const fold = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/ß/g, 'ss');
+
+// Words all have to match (name, note, category, account); numbers match amounts: "42,17" exactly, "42" any 42,xx.
+export function searchTransactions(state, query, { dir = 'all', accountId = null } = {}) {
+  const words = fold(query).split(/\s+/).filter(Boolean);
+  const accounts = new Map(state.accounts.map((a) => [a.id, a]));
+  const cats = new Map(state.categories.map((c) => [c.id, c]));
+  const tests = words.map((w) => {
+    const plain = w.replace(/^[+−-]|€|\$/g, '');
+    if (/^\d+([.,]\d{1,2})?$/.test(plain)) {
+      const [whole, frac] = plain.split(/[.,]/);
+      const target = Number(whole) * 100 + (frac ? Number(frac.padEnd(2, '0')) : 0);
+      return (t, text) => (frac ? Math.abs(t.amount) === target : Math.floor(Math.abs(t.amount) / 100) === Number(whole)) || text.includes(w);
+    }
+    return (t, text) => text.includes(w);
+  });
+  return state.transactions
+    .filter((t) => t.source !== 'opening' && (!accountId || t.accountId === accountId) &&
+      (dir === 'all' || (dir === 'out' ? t.amount < 0 : t.amount > 0)))
+    .filter((t) => {
+      if (!tests.length) return false;
+      const text = fold([t.payee, t.note, t.paypalFor, cats.get(t.category)?.name, accounts.get(t.accountId)?.name].join(' '));
+      return tests.every((test) => test(t, text));
+    })
+    .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
+
 // For a bank debit to PayPal, the PayPal payment it paid for.
 export function payPalMatch(state, tx) {
   if (!isPayPalPayee(tx.payee) || tx.amount >= 0) return null;

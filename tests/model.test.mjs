@@ -207,3 +207,20 @@ test('a transaction set not to count stays on the balance but out of spending an
   assert.deepEqual(periodSummary(s, monthStart(T), T), before);
   assert.equal(accountBalance(s, 'bank'), 100000 - 1099 - 4217);
 });
+
+test('search matches words anywhere and numbers as amounts', async () => {
+  const { searchTransactions } = await import('../src/model.js');
+  const s = setup();
+  s.transactions.push({ id: 'm', accountId: 'bank', amount: -4250, payee: 'Bäckerei Müller', category: 'eating-out', date: '2026-09-01', note: 'Kuchen' });
+  const ids = (q, o) => searchTransactions(s, q, o).map((t) => t.id).sort();
+  assert.deepEqual(ids('rewe'), ['b2']);
+  assert.deepEqual(ids('muller backerei'), ['m']); // any order, no accents needed
+  assert.deepEqual(ids('kuchen'), ['m']); // notes too
+  assert.deepEqual(ids('42,17'), ['b2']);
+  assert.deepEqual(ids('42'), ['b2', 'm']);
+  assert.deepEqual(ids('10.99'), ['b1', 'p1']);
+  assert.deepEqual(ids('spotify paypal'), ['p1']); // account name
+  assert.deepEqual(ids('groceries'), ['b2']); // category
+  assert.deepEqual(ids('42', { dir: 'in' }), []);
+  assert.deepEqual(ids(''), []);
+});

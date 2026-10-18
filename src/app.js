@@ -8,6 +8,7 @@ import {
   findExisting, payPalMatch, checkDiff, openChecks, accountStatus, fixSuggestions, correctionTx, refreshChecks,
   countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
   monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer, reconcile, planFromTx, planForTx, unclearPayPal,
+  searchTransactions,
 } from './model.js';
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc, setMoneyHidden } from './format.js';
 import { lineChart, barChart } from './charts.js';
@@ -51,7 +52,8 @@ function paint(html, { tabs = false, active = '' } = {}) {
   if (path !== lastPath) {
     window.scrollTo(0, 0);
     lastPath = path;
-    $app.querySelector('[autofocus]')?.focus();
+    const f = $app.querySelector('[autofocus]');
+    if (f) { f.focus(); if (f.type === 'search') f.setSelectionRange(f.value.length, f.value.length); }
   }
 }
 
@@ -74,6 +76,7 @@ function render() {
     case 'review': return paint(viewReview());
     case 'fix': return paint(viewFix(id));
     case 'tx': return paint(viewTx(id, r.q));
+    case 'search': return paint(viewSearch(r.q), { tabs: true, active: '' });
     case 'settings': return paint(viewSettings(), { tabs: true, active: 'settings' });
     case 'categories': return paint(viewCategories());
     default: go('#/');
@@ -101,6 +104,7 @@ function backBar(href, title = '', extra = '') {
 }
 
 function toast(text) {
+  document.querySelectorAll('.toast').forEach((t) => t.remove()); // one at a time, the newest wins
   const el = document.createElement('div');
   el.className = 'toast';
   el.setAttribute('role', 'status');
@@ -177,7 +181,14 @@ function fundingBank(acc) {
   return acc?.kind === 'wallet' && acc.fundedFrom ? accountById(acc.fundedFrom) : null;
 }
 
-function txRow(t, { showAccount = false } = {}) {
+// Escaped text with the searched words marked.
+function marked(text, words) {
+  const ws = (words || []).filter((w) => w && !/^[\d.,+−-]+$/.test(w)).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!ws.length) return esc(text);
+  return String(text).split(new RegExp(`(${ws.join('|')})`, 'gi')).map((part, i) => (i % 2 ? `<mark>${esc(part)}</mark>` : esc(part))).join('');
+}
+
+function txRow(t, { showAccount = false, words = null } = {}) {
   const acc = accountById(t.accountId);
   const paidFrom = t.paidFrom ? accountById(t.paidFrom) : null;
   const match = payPalMatch(state, t);
@@ -189,7 +200,7 @@ function txRow(t, { showAccount = false } = {}) {
     t.excluded ? '<span>not counted</span>' : '',
   ].filter(Boolean).join('');
   return `<a class="row" href="#/tx/${esc(t.id)}">
-    <span class="row-main"><span class="row-title">${esc(t.payee || 'No description')}</span><span class="row-sub">${sub}</span></span>
+    <span class="row-main"><span class="row-title">${words ? marked(t.payee || 'No description', words) : esc(t.payee || 'No description')}</span><span class="row-sub">${sub}</span></span>
     <span class="row-end"><span class="amount ${signedClass(t.amount)} ${countsOnBalance(t) ? '' : 'muted'}">${money(t.amount, { sign: true, ...cur(acc) })}</span></span>
   </a>`;
 }
@@ -284,6 +295,7 @@ function viewOverview() {
   const header = `<div class="topbar">
     <span class="eyebrow">${esc(monthLabel(t))}</span>
     <span class="topbar-extra">
+      <a class="icon-button" href="#/search" aria-label="Search payments">${icons.search}</a>
       ${hideButton()}
       <button class="icon-button" data-action="lock" aria-label="Lock">${icons.lock}</button>
     </span>
@@ -447,7 +459,7 @@ function viewSpending(p) {
   const suggestions = categorySuggestions(state).slice(0, 3);
   const unc = uncategorisedCount(state);
   return `<main class="page">
-    <div class="topbar"><h1 class="page-title">Spending</h1><span class="topbar-extra">${hideButton()}</span></div>
+    <div class="topbar"><h1 class="page-title">Spending</h1><span class="topbar-extra"><a class="icon-button" href="#/search" aria-label="Search payments">${icons.search}</a>${hideButton()}</span></div>
     <div class="pills" role="tablist">${Object.entries(PERIODS).map(([k, v]) => `<a class="pill ${k === p ? 'active' : ''}" href="#/spending?p=${k}" role="tab" aria-selected="${k === p}">${v}</a>`).join('')}</div>
     <div class="cards">
       <div class="card"><div class="label">Spent</div><div class="mid-number">${money(s.spent)}</div></div>
@@ -774,6 +786,67 @@ function buildDraft(parsed, accountId) {
   };
   applyAccountToDraft(d);
   return d;
+}
+
+// ---------- search ----------
+
+const SEARCH_DIRS = { all: 'All', out: 'Money out', in: 'Money in' };
+const SEARCH_LIMIT = 200;
+let searchTimer = null;
+
+function searchResults(q, dir) {
+  if (!q.trim()) {
+    const recent = state.settings.recentSearches || [];
+    return `${recent.length ? `<section><div class="section-head"><h2>Recent</h2><button class="link small" data-action="clear-searches">Clear</button></div>
+      <div class="pills wrap">${recent.map((r) => `<a class="pill" href="#/search?${new URLSearchParams({ q: r, dir })}">${esc(r)}</a>`).join('')}</div></section>` : ''}
+      <p class="small muted">Search by name, note, category or account. Numbers find amounts: 42,17 exactly, or 42 for anything from 42,00 to 42,99.</p>`;
+  }
+  const found = searchTransactions(state, q, { dir });
+  if (!found.length) return `<section class="empty"><div class="empty-icon">${icons.search}</div><h1>Nothing found</h1><p class="muted">No payments match "${esc(q.trim())}"${dir !== 'all' ? ` in ${esc(SEARCH_DIRS[dir].toLowerCase())}` : ''}. Check the spelling or try fewer words.</p></section>`;
+  const words = q.trim().split(/\s+/);
+  const eurSum = found.reduce((sum, t) => sum + toEur(state, t.amount, currencyOf(accountById(t.accountId))), 0);
+  const shown = found.slice(0, SEARCH_LIMIT);
+  return `<p class="small muted" role="status">${found.length} payment${found.length === 1 ? '' : 's'} · ${money(eurSum, { sign: true })} in total${found.length > SEARCH_LIMIT ? ` · showing the newest ${SEARCH_LIMIT}` : ''}</p>
+    ${groupByDate(shown).map((g) => `<div class="date-head">${esc(dateLabel(g.date))}</div><div class="list">${g.txs.map((x) => txRow(x, { showAccount: true, words })).join('')}</div>`).join('')}`;
+}
+
+function viewSearch(qs) {
+  const q = qs.get('q') || '';
+  const dir = SEARCH_DIRS[qs.get('dir')] ? qs.get('dir') : 'all';
+  return `<main class="page">
+    ${backBar('#/', 'Search')}
+    <form class="search-box" role="search" data-form="search">
+      ${icons.search}
+      <input type="search" name="q" value="${esc(q)}" placeholder="Search payments" aria-label="Search payments" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search" data-input="search" autofocus>
+    </form>
+    <div class="pills" role="tablist" aria-label="Show">${Object.entries(SEARCH_DIRS).map(([k, v]) => `<a class="pill ${k === dir ? 'active' : ''}" role="tab" aria-selected="${k === dir}" href="#/search?${new URLSearchParams({ q, dir: k })}">${v}</a>`).join('')}</div>
+    <div id="search-results">${searchResults(q, dir)}</div>
+  </main>`;
+}
+
+// Typing updates only the results, so the keyboard and cursor stay put.
+function updateSearch(input) {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => {
+    const dir = new URLSearchParams(location.hash.split('?')[1] || '').get('dir') || 'all';
+    const hash = `#/search?${new URLSearchParams({ q: input.value, dir })}`;
+    history.replaceState(null, '', hash);
+    lastPath = hash;
+    document.getElementById('search-results').innerHTML = searchResults(input.value, dir);
+    document.querySelectorAll('.pills a.pill[role=tab]').forEach((a) => {
+      const u = new URLSearchParams(a.getAttribute('href').split('?')[1]);
+      u.set('q', input.value);
+      a.setAttribute('href', '#/search?' + u);
+    });
+  }, 120);
+}
+
+function rememberSearch() {
+  const q = new URLSearchParams(location.hash.split('?')[1] || '').get('q')?.trim();
+  if (!q || !location.hash.startsWith('#/search')) return;
+  const recent = (state.settings.recentSearches || []).filter((r) => r.toLowerCase() !== q.toLowerCase());
+  state.settings.recentSearches = [q, ...recent].slice(0, 6);
+  commit({ rerender: false });
 }
 
 function viewPayPalQuestions() {
@@ -1364,6 +1437,10 @@ const forms = {
     toast('Passcode changed. Older backups still open with the old passcode.');
     render();
   },
+  search(f, form) {
+    form.querySelector('input').blur();
+    rememberSearch();
+  },
   'paypal-for'(f, form) {
     const t = state.transactions.find((x) => x.id === form.dataset.id);
     const what = f.get('what').trim();
@@ -1435,6 +1512,10 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  'clear-searches'() {
+    state.settings.recentSearches = [];
+    commit();
+  },
   'paypal-topup'(el) {
     const t = state.transactions.find((x) => x.id === el.dataset.id);
     t.paypalFor = '';
@@ -1730,6 +1811,7 @@ function updateDraftRow(el) {
 // ---------- events ----------
 
 document.addEventListener('click', (e) => {
+  if (e.target.closest('#search-results a.row')) rememberSearch();
   const picker = e.target.closest('input[data-change=scan-files]');
   if (picker && canDeletePicked() && !picker.dataset.plain) {
     e.preventDefault();
@@ -1770,6 +1852,7 @@ document.addEventListener('input', (e) => {
     const out = el.form.querySelector('[name=dir]:checked')?.value === 'out';
     sel.value = suggestCategory(el.value, out ? -1 : 1, state.rules, acc) || '';
   }
+  if (el.dataset.input === 'search') updateSearch(el);
   if (el.dataset.input === 'paypal-what') {
     const sel = el.form.querySelector('[name=category]');
     if (!sel.dataset.touched) sel.value = suggestCategory(el.value, -1, state.rules) || '';
