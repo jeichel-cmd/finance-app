@@ -8,7 +8,7 @@ import {
   findExisting, payPalMatch, checkDiff, openChecks, accountStatus, fixSuggestions, correctionTx, refreshChecks,
   countsOnBalance, currencyOf, shareOf, yourValue, toEur, usdRate, hasUsd, recurringPayments, planTimeline,
   monthlyReserve, FREQUENCIES, transferPartner, linkTransfer, unlinkTransfer, reconcile, planFromTx, planForTx, unclearPayPal,
-  searchTransactions,
+  searchTransactions, findLikely,
 } from './model.js';
 import { money, percent, today, addDays, addMonths, monthStart, monthLabel, dateLabel, ago, parseTyped, typedValue, uid, esc, setMoneyHidden } from './format.js';
 import { lineChart, barChart } from './charts.js';
@@ -865,23 +865,41 @@ function viewPayPalQuestions() {
   </main>`;
 }
 
+function findReport(d = draft) {
+  return reconcile(state, d.account, { balance: d.balance, date: d.balanceDate, rows: d.rows },
+    { confirmed: new Set(d.confirmed || []), rejected: new Set(d.rejected || []) });
+}
+
 function viewFind() {
   const d = draft;
   const acc = accountById(d.account);
   if (!acc) return `<main class="page narrow">${backBar('#/scan')}<p class="muted">Add the account first, then compare a screenshot with it.</p></main>`;
   const c = cur(acc);
-  const r = reconcile(state, acc.id, { balance: d.balance, date: d.balanceDate, rows: d.rows });
-  const rowLine = (x, extra = '') => `<span class="row-main"><span class="row-title">${esc(x.payee || 'No description')}</span><span class="row-sub"><span>${esc(dateLabel(x.date))}</span>${extra}</span></span>`;
+  const r = findReport(d);
+  const cell = (x, extra = '') => `<div class="split-cell"><span class="row-title">${esc(x.payee || 'No description')}</span>
+    <span class="split-line"><span class="amount ${signedClass(x.amount)}">${money(x.amount, { sign: true, ...c })}</span><span class="small muted">${esc(dateLabel(x.date))}</span></span>${extra}</div>`;
+  const empty = (text, button = '') => `<div class="split-cell empty-cell"><span class="small muted">${text}</span>${button}</div>`;
+  const pairRow = (p) => {
+    const key = p.row && p.tx ? `data-row="${esc(p.row.id)}" data-tx="${esc(p.tx.id)}"` : '';
+    switch (p.kind) {
+      case 'likely': return `<div class="split-pair likely">${cell(p.row)}${cell(p.tx)}
+        <div class="split-ask"><span>Same payment? The amount matches, the name differs.</span>
+        <span class="button-row tight"><button class="button plain small" data-action="find-not-same" ${key}>No</button><button class="button primary small" data-action="find-same" ${key}>Yes, same</button></span></div></div>`;
+      case 'match': return `<div class="split-pair match">${cell(p.row)}${cell(p.tx, `<span class="split-ok">${icons.check}${p.confirmed ? 'You confirmed' : 'Matches'}</span>`)}</div>`;
+      case 'different': return `<div class="split-pair different">${cell(p.row)}${cell(p.tx, `<button class="button primary small" data-action="find-amount" ${key}>Use ${money(p.row.amount, c)}</button>`)}</div>`;
+      case 'missing': return `<div class="split-pair missing">${cell(p.row)}${empty('Not in the app', `<button class="button primary small" data-action="find-add" data-row="${esc(p.row.id)}">Add</button>`)}</div>`;
+      case 'extra': return `<div class="split-pair extra">${empty(p.edge ? 'Maybe just above the screenshot' : 'Not on the screenshot')}${cell(p.tx, `<button class="button ${p.edge ? 'plain' : 'secondary'} small" data-action="find-remove" data-tx="${esc(p.tx.id)}">Remove</button>`)}</div>`;
+      default: return '';
+    }
+  };
+  const open = r.pairs.filter((p) => p.kind !== 'match' && p.kind !== 'likely');
   const fixable = r.missing.length + r.different.length + r.extra.filter((e) => !e.edge).length;
-  const section = (title, hint, items) => items.length ? `<section><div class="section-head"><h2>${title}</h2></div><p class="small muted">${hint}</p><div class="list">${items.join('')}</div></section>` : '';
-  const missing = r.missing.map((x) => `<div class="row">${rowLine(x)}<span class="row-end"><span class="amount ${signedClass(x.amount)}">${money(x.amount, { sign: true, ...c })}</span><button class="button primary small" data-action="find-add" data-row="${esc(x.id)}">Add</button></span></div>`);
-  const extra = r.extra.map((e) => `<div class="row">${rowLine(e.tx, e.edge ? '<span>maybe just above the screenshot</span>' : '')}<span class="row-end"><span class="amount ${signedClass(e.tx.amount)}">${money(e.tx.amount, { sign: true, ...c })}</span><button class="button ${e.edge ? 'plain' : 'secondary'} small" data-action="find-remove" data-tx="${esc(e.tx.id)}">Remove</button></span></div>`);
-  const different = r.different.map((x) => `<div class="row">${rowLine(x.tx, `<span>app ${money(x.tx.amount, c)}, screenshot ${money(x.row.amount, c)}</span>`)}<span class="row-end"><button class="button primary small" data-action="find-amount" data-tx="${esc(x.tx.id)}" data-row="${esc(x.row.id)}">Use ${money(x.row.amount, c)}</button></span></div>`);
   let verdict = '';
-  if (r.diff === 0) verdict = `<p class="note ok">${icons.check}<span>The app matches the screenshot.</span></p>`;
-  else if (r.diff != null && r.rest === 0) verdict = `<p class="note ok">${icons.check}<span>These explain the whole difference.</span></p>`;
-  else if (r.diff != null && r.restWithEdge === 0) verdict = `<p class="note">${icons.spark}<span>These explain it if the entries marked "maybe just above the screenshot" really aren't in the account.</span></p>`;
+  if (r.diff === 0 && !open.length) verdict = `<p class="note ok">${icons.check}<span>The app matches the screenshot.</span></p>`;
+  else if (r.diff != null && r.rest === 0) verdict = `<p class="note ok">${icons.check}<span>${open.length ? 'The items below explain the whole difference.' : 'Balance matches.'}${r.likely.length ? ' Please confirm the probable matches.' : ''}</span></p>`;
+  else if (r.diff != null && r.restWithEdge === 0) verdict = `<p class="note">${icons.spark}<span>This explains it if the entries marked "maybe just above the screenshot" really aren't in the account.</span></p>`;
   else if (r.diff != null) verdict = `<p class="note">${icons.warn}<span>${money(r.rest, { sign: true, ...c })} ${fixable ? 'is still unexplained after these' : "can't be explained by this screenshot"}. It comes from before ${esc(dateLabel(r.from))}: add a screenshot that goes further back, or set the balance.</span></p>`;
+  const head = `<div class="split-head"><span>Screenshot</span><span>In the app</span></div>`;
   return `<main class="page">
     ${backBar(`#/account/${esc(acc.id)}`, 'Find a difference')}
     <label class="field">Account<select data-change="find-account">${state.accounts.map((a) => `<option value="${esc(a.id)}" ${a.id === acc.id ? 'selected' : ''}>${esc(a.name)}</option>`).join('')}</select></label>
@@ -890,16 +908,16 @@ function viewFind() {
       <div><span class="muted">In the app</span><span class="amount">${money(r.app, c)}</span></div>
       ${r.diff == null ? '' : `<div class="total"><span>Difference</span><span class="amount ${r.diff ? 'warn-text' : ''}">${money(r.diff, { sign: true, ...c })}</span></div>`}
     </div>
-    <p class="small muted">Compared ${d.rows.length} payment${d.rows.length === 1 ? '' : 's'} from ${esc(dateLabel(r.from))} on: ${r.matched.length} already in the app.</p>
+    <p class="small muted">${d.rows.length} payment${d.rows.length === 1 ? '' : 's'} on the screenshot from ${esc(dateLabel(r.from))} on: ${r.matched.length} match${r.likely.length ? `, ${r.likely.length} probably` : ''}${open.length ? `, ${open.length} to sort out` : ''}.</p>
     ${verdict}
-    ${section('Missing in the app', 'On the screenshot but not saved.', missing)}
-    ${section('Not on the screenshot', 'Saved in the app but not on the screenshot. Maybe saved twice, or it never happened.', extra)}
-    ${section('Different amount', 'Saved with another amount than on the screenshot.', different)}
+    ${r.likely.length ? `<section><div class="section-head"><h2>Probably the same</h2></div>${head}<div class="split">${r.likely.map(pairRow).join('')}</div></section>` : ''}
+    ${open.length ? `<section><div class="section-head"><h2>To sort out</h2></div>${head}<div class="split">${open.map(pairRow).join('')}</div></section>` : ''}
     <section class="stack">
       ${fixable > 1 ? `<button class="button primary wide" data-action="find-all">Fix all ${fixable}</button>` : ''}
       ${r.diff && r.rest ? `<button class="button secondary wide" data-action="find-done" data-correct="1">Set the balance to ${money(d.balance, c)}</button>` : ''}
       <button class="button ${fixable > 1 ? 'plain' : 'secondary'} wide" data-action="find-done">Done</button>
     </section>
+    ${r.matched.length ? `<details class="split-matched"><summary class="small muted">Show the ${r.matched.length} that match</summary>${head}<div class="split">${r.matched.map(pairRow).join('')}</div></details>` : ''}
     <details><summary class="small muted">Show the text that was read</summary><pre>${esc(d.text || '')}</pre></details>
   </main>`;
 }
@@ -926,11 +944,20 @@ function draftAccount(d) {
 function applyAccountToDraft(d) {
   const acc = draftAccount(d);
   const used = new Set();
+  // Sure matches first, so a loose one can't take a payment another row matches exactly.
   for (const r of d.rows) {
     const existing = acc?.id ? findExisting(state, acc.id, r, used) : null;
     if (existing) used.add(existing.id);
     r.existing = Boolean(existing);
-    r.include = !existing;
+    r.likely = null;
+  }
+  for (const r of d.rows) {
+    // Same amount around the same date under another name: probably saved already, the person decides.
+    const likely = !r.existing && acc?.id ? findLikely(state, acc.id, r, used) : null;
+    if (likely) { used.add(likely.id); r.likely = { payee: likely.payee, date: likely.date }; }
+    r.include = !r.existing && !likely;
+  }
+  for (const r of d.rows) {
     if (!r.categoryTouched) r.category = suggestCategory(r.payee, r.amount, state.rules, acc);
     r.paidFromBank = Boolean(acc && fundingBank(acc) && r.amount < 0);
   }
@@ -957,6 +984,7 @@ function viewReview() {
     </div>
     ${bank && r.amount < 0 ? `<label class="inline-check"><input type="checkbox" data-row-field="paidFromBank" ${r.paidFromBank ? 'checked' : ''}>Paid from ${esc(bank.name)}</label>` : ''}
     ${r.existing ? '<span class="badge">Already saved</span>' : ''}
+    ${r.likely ? `<span class="hint likely-hint">Same amount as "${esc(r.likely.payee)}" (${esc(dateLabel(r.likely.date))}), probably already saved, so it's not ticked. Tick it if it's a new payment.</span>` : ''}
     ${r.signGuessed && !r.existing ? '<span class="hint">No + or − on the screenshot, so this is a guess. Add a minus for money going out.</span>' : ''}
   </div>`).join('');
   return `<main class="page">
@@ -1533,9 +1561,17 @@ const actions = {
     state.transactions.find((t) => t.id === el.dataset.tx).amount = findRow(el.dataset.row).amount;
     commit();
   },
+  'find-same'(el) {
+    draft.confirmed = [...(draft.confirmed || []), `${el.dataset.row}|${el.dataset.tx}`];
+    render();
+  },
+  'find-not-same'(el) {
+    draft.rejected = [...(draft.rejected || []), `${el.dataset.row}|${el.dataset.tx}`];
+    render();
+  },
   'find-all'() {
     const acc = accountById(draft.account);
-    const r = reconcile(state, acc.id, { balance: draft.balance, date: draft.balanceDate, rows: draft.rows });
+    const r = findReport();
     for (const x of r.missing) findAdd(x, acc);
     for (const e of r.extra) if (!e.edge) findRemove(e.tx);
     for (const x of r.different) x.tx.amount = x.row.amount;

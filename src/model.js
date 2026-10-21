@@ -273,41 +273,63 @@ export function unlinkTransfer(state, tx) {
 // ---------- find the difference: one screenshot (balance + latest payments) against the app ----------
 
 // shot: { balance (cents or null), date (ISO, the balance's date), rows: [{ id, payee, amount, date, dateGuessed }] }.
-// Returns what's missing, extra or different, and how much of the difference that explains.
-export function reconcile(state, accountId, shot) {
+// opts.confirmed / opts.rejected: Sets of `${rowId}|${txId}` the person said are / aren't the same payment.
+// Names change after saving (renamed, shortened by the bank), so the amount decides; a different name only asks.
+// Returns pairs for a side-by-side view and how much of the difference the open items explain.
+export function reconcile(state, accountId, shot, { confirmed = new Set(), rejected = new Set() } = {}) {
   const rows = shot.rows || [];
   const from = rows.reduce((m, r) => (r.date < m ? r.date : m), shot.date);
   const txs = state.transactions.filter((t) => t.accountId === accountId && countsOnBalance(t) && t.source !== 'opening');
-  const used = new Set();
-  const take = (t) => { used.add(t.id); return t; };
-  const near = (t, r, days) => Math.abs(daysBetween(t.date, r.date)) <= (r.dateGuessed ? Math.max(days, 10) : days);
-  const matched = [], missing = [], different = [];
-  const pending = [];
-  // Exact matches first, so a looser rule can't steal one.
+  const used = new Set(), done = new Set();
+  const days = (t, r) => Math.abs(daysBetween(t.date, r.date));
+  const pairs = [];
+  const pair = (r, t, kind, extra = {}) => { used.add(t.id); done.add(r.id); pairs.push({ kind, row: r, tx: t, ...extra }); };
+  const free = (r, t) => !used.has(t.id) && !rejected.has(`${r.id}|${t.id}`);
+  const closest = (r, ok) => txs.filter((t) => free(r, t) && ok(t)).sort((a, b) => days(a, r) - days(b, r))[0];
+  // 1. What the person already confirmed.
   for (const r of rows) {
-    const t = txs.find((x) => !used.has(x.id) && x.amount === r.amount && near(x, r, 3) && samePayee(x.payee, r.payee));
-    if (t) matched.push({ row: r, tx: take(t) }); else pending.push(r);
+    const t = txs.find((x) => !used.has(x.id) && confirmed.has(`${r.id}|${x.id}`));
+    if (t) pair(r, t, 'match', { confirmed: true });
   }
-  for (const r of pending) {
-    const t = txs.find((x) => !used.has(x.id) && x.amount === r.amount && near(x, r, 5));
-    if (t) { matched.push({ row: r, tx: take(t) }); continue; }
-    const d = txs.find((x) => !used.has(x.id) && Math.sign(x.amount) === Math.sign(r.amount) && near(x, r, 3) &&
+  // 2. Same amount, close date, similar name: sure.
+  for (const r of rows) {
+    if (done.has(r.id)) continue;
+    const t = closest(r, (x) => x.amount === r.amount && days(x, r) <= (r.dateGuessed ? 10 : 3) && samePayee(x.payee, r.payee));
+    if (t) pair(r, t, 'match');
+  }
+  // 3. Same amount within about a week, whatever the name: probably the same, ask.
+  for (const r of rows) {
+    if (done.has(r.id)) continue;
+    const t = closest(r, (x) => x.amount === r.amount && days(x, r) <= (r.dateGuessed ? 14 : 7));
+    if (t) pair(r, t, 'likely');
+  }
+  // 4. Same name and date but another amount.
+  for (const r of rows) {
+    if (done.has(r.id)) continue;
+    const t = closest(r, (x) => Math.sign(x.amount) === Math.sign(r.amount) && days(x, r) <= 3 &&
       normalizePayee(x.payee) && normalizePayee(r.payee) && samePayee(x.payee, r.payee));
-    if (d) different.push({ row: r, tx: take(d), delta: r.amount - d.amount });
-    else missing.push(r);
+    if (t) pair(r, t, 'different', { delta: r.amount - t.amount });
   }
-  const extra = txs
-    .filter((t) => !used.has(t.id) && t.date >= from && t.date <= shot.date)
-    .map((t) => ({ tx: t, edge: t.date === from })) // on the oldest day shown, it may just be scrolled off
-    .sort((a, b) => (a.tx.date < b.tx.date ? 1 : -1));
+  for (const r of rows) if (!done.has(r.id)) pairs.push({ kind: 'missing', row: r });
+  for (const t of txs) {
+    if (used.has(t.id) || t.date < from || t.date > shot.date) continue;
+    pairs.push({ kind: 'extra', tx: t, edge: t.date === from }); // on the oldest day shown, it may just be scrolled off
+  }
+  const dateOf = (p) => (p.row || p.tx).date;
+  pairs.sort((a, b) => dateOf(b).localeCompare(dateOf(a)));
+  const of = (k) => pairs.filter((p) => p.kind === k);
   const app = accountBalance(state, accountId, shot.date);
   const diff = shot.balance == null ? null : shot.balance - app;
-  const explained = missing.reduce((s, r) => s + r.amount, 0)
-    - extra.filter((e) => !e.edge).reduce((s, e) => s + e.tx.amount, 0)
-    + different.reduce((s, d) => s + d.delta, 0);
-  const edgeTotal = -extra.filter((e) => e.edge).reduce((s, e) => s + e.tx.amount, 0);
+  const explained = of('missing').reduce((s, p) => s + p.row.amount, 0)
+    - of('extra').filter((p) => !p.edge).reduce((s, p) => s + p.tx.amount, 0)
+    + of('different').reduce((s, p) => s + p.delta, 0);
+  const edgeTotal = -of('extra').filter((p) => p.edge).reduce((s, p) => s + p.tx.amount, 0);
   const rest = diff == null ? null : diff - explained;
-  return { from, app, diff, matched, missing, extra, different, explained, rest, restWithEdge: rest == null ? null : rest - edgeTotal };
+  return {
+    from, app, diff, pairs, explained, rest, restWithEdge: rest == null ? null : rest - edgeTotal,
+    matched: of('match'), likely: of('likely'), missing: of('missing').map((p) => p.row),
+    extra: of('extra').map((p) => ({ tx: p.tx, edge: p.edge })), different: of('different'),
+  };
 }
 
 // Bank debits to PayPal with nothing saying what they paid for: no matching PayPal payment and no answer yet.
@@ -345,6 +367,14 @@ export function searchTransactions(state, query, { dir = 'all', accountId = null
       return tests.every((test) => test(t, text));
     })
     .sort((a, b) => b.date.localeCompare(a.date) || String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+}
+
+// Saved with the same amount around the same date, under another name: maybe the same payment (the person decides).
+export function findLikely(state, accountId, tx, exclude = new Set()) {
+  return state.transactions
+    .filter((t) => t.accountId === accountId && !exclude.has(t.id) && t.amount === tx.amount && t.source !== 'opening' &&
+      Math.abs(daysBetween(t.date, tx.date)) <= (tx.dateGuessed ? 14 : 7))
+    .sort((a, b) => Math.abs(daysBetween(a.date, tx.date)) - Math.abs(daysBetween(b.date, tx.date)))[0] || null;
 }
 
 // For a bank debit to PayPal, the PayPal payment it paid for.

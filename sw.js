@@ -1,5 +1,5 @@
 // Keeps the app working offline. The app never talks to any server except the one it was installed from.
-const VERSION = 'v15';
+const VERSION = 'v16';
 const SHELL = `shell-${VERSION}`;
 const READER = 'reader-v1';
 

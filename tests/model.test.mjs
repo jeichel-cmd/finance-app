@@ -224,3 +224,22 @@ test('search matches words anywhere and numbers as amounts', async () => {
   assert.deepEqual(ids('42', { dir: 'in' }), []);
   assert.deepEqual(ids(''), []);
 });
+
+test('a renamed payment with the same amount is offered as probably the same, and the answer sticks', async () => {
+  const { reconcile } = await import('../src/model.js');
+  const s = emptyState();
+  s.accounts.push({ id: 'b', name: 'DKB', kind: 'bank' });
+  s.transactions.push({ id: 'o', accountId: 'b', amount: 50000, payee: 'Starting balance', date: '2026-09-01', source: 'opening' });
+  s.transactions.push({ id: 'g', accountId: 'b', amount: -6000, payee: 'Gym membership', date: '2026-10-03' });
+  const shot = { balance: 44000, date: '2026-10-05', rows: [{ id: 'r', payee: 'FitX Deutschland GmbH', amount: -6000, date: '2026-10-02' }] };
+  let r = reconcile(s, 'b', shot);
+  assert.equal(r.likely.length, 1);
+  assert.equal(r.likely[0].tx.id, 'g');
+  assert.equal(r.missing.length, 0);
+  assert.equal(r.rest, 0);
+  r = reconcile(s, 'b', shot, { confirmed: new Set(['r|g']) });
+  assert.equal(r.matched[0].confirmed, true);
+  r = reconcile(s, 'b', shot, { rejected: new Set(['r|g']) });
+  assert.deepEqual(r.missing.map((x) => x.id), ['r']);
+  assert.deepEqual(r.extra.map((x) => x.tx.id), ['g']);
+});

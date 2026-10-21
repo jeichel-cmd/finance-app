@@ -54,7 +54,7 @@ const findShot = await drawScreenshot('find', `
   <div class="d">Heute</div>
   <div class="r"><span>REWE Markt GmbH</span><span>-42,17 €</span></div>
   <div class="d">Gestern</div>
-  <div class="r"><span>PayPal Europe</span><span>-10,99 €</span></div>
+  <div class="r"><span>PP.8812.PP Zahlung</span><span>-10,99 €</span></div>
   <div class="r"><span>Kino Ulm</span><span>-15,00 €</span></div>
   <div class="d">01.10.2026</div>
   <div class="r"><span>Miete Oktober</span><span>-820,00 €</span></div>
@@ -321,12 +321,16 @@ await page.getByRole('link', { name: /Sparkasse Giro doesn't match/ }).click();
 await page.getByRole('link', { name: 'Find the cause with a screenshot' }).click();
 await page.evaluate(() => { delete window.showOpenFilePicker; });
 await page.locator('input[data-change=scan-files]').setInputFiles(findShot);
-await page.getByRole('heading', { name: 'Missing in the app' }).waitFor({ timeout: 180000 });
+await page.getByRole('heading', { name: 'To sort out' }).waitFor({ timeout: 180000 });
 const findText = await page.locator('main').innerText();
 await shot('16-find');
 if (!/Kino/.test(findText)) throw new Error('missing payment not found');
 if (!/Not on the screenshot[\s\S]*Lieferando/i.test(findText)) throw new Error('extra payment not found');
-if (!/These explain the whole difference/.test(findText)) throw new Error('difference not explained:\n' + findText);
+if (!/explain the whole difference/.test(findText)) throw new Error('difference not explained:\n' + findText);
+// Renamed on the screenshot but the same amount: the app asks instead of adding it again.
+if (!/Probably the same/i.test(findText)) throw new Error('renamed payment not offered as probably the same');
+await page.getByRole('button', { name: 'Yes, same' }).click();
+await page.getByText('You confirmed').waitFor({ state: 'attached' });
 await page.getByRole('button', { name: /^Fix all/ }).click();
 await page.getByText('The app matches the screenshot').waitFor();
 await page.getByRole('button', { name: 'Done' }).click();
