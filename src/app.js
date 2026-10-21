@@ -24,6 +24,7 @@ let state = null;
 let vaultExists = false;
 let bio = null; // fingerprint unlock data, when turned on
 let bioAvailable = false;
+let selecting = null; // { accountId, ids: Set } while picking several transactions in an account
 let pickedHandles = null; // screenshots picked with Android's file picker, so they can be deleted after saving
 let unlockError = '';
 let restoreText = null;
@@ -63,9 +64,12 @@ function render() {
   setMoneyHidden(state.settings.hideMoney);
   const r = route();
   const [page, id] = r.parts;
+  if (page !== 'search') clearTimeout(searchTimer);
   switch (page) {
     case undefined: return paint(viewOverview(), { tabs: true, active: 'home' });
-    case 'account': return paint(viewAccount(id), { tabs: true, active: 'home' });
+    case 'account':
+      if (selecting && selecting.accountId !== id) selecting = null;
+      return paint(viewAccount(id), { tabs: !(selecting && selecting.accountId === id), active: 'home' });
     case 'account-edit': return paint(viewAccountEdit(id));
     case 'spending': return paint(viewSpending(r.q.get('p') || 'month'), { tabs: true, active: 'spending' });
     case 'category': return paint(viewCategory(id, r.q.get('p') || 'month'), { tabs: true, active: 'spending' });
@@ -103,15 +107,24 @@ function backBar(href, title = '', extra = '') {
   </div>`;
 }
 
-function toast(text) {
+// action: { label, run } adds a button, e.g. Undo, and keeps the message up a little longer.
+function toast(text, action = null) {
   document.querySelectorAll('.toast').forEach((t) => t.remove()); // one at a time, the newest wins
   const el = document.createElement('div');
   el.className = 'toast';
   el.setAttribute('role', 'status');
   el.textContent = text;
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'toast-action';
+    b.textContent = action.label;
+    b.addEventListener('click', () => { el.remove(); action.run(); });
+    el.append(b);
+  }
   document.body.appendChild(el);
-  setTimeout(() => el.classList.add('gone'), 2600);
-  setTimeout(() => el.remove(), 3000);
+  const ms = action ? 6000 : 2600;
+  setTimeout(() => el.classList.add('gone'), ms);
+  setTimeout(() => el.remove(), ms + 400);
 }
 
 // ---------- saving ----------
@@ -390,11 +403,82 @@ function viewAccount(id) {
       <a class="button secondary" href="#/tx/new?account=${esc(acc.id)}">Add by hand</a>
     </div>
     <a class="link small find-account-link" href="#/scan?account=${esc(acc.id)}&mode=find">${icons.search}<span>Find a difference with a screenshot</span></a>
-    <section>
-      <div class="section-head"><h2>Transactions</h2></div>
+    ${selecting?.accountId === acc.id ? selectionList(acc, txs) : `<section>
+      <div class="section-head"><h2>Transactions</h2>${txs.length > 1 ? `<button class="link" data-action="select-start" data-account="${esc(acc.id)}">Select</button>` : ''}</div>
       ${txs.length ? groupByDate(txs).map((g) => `<div class="date-head">${esc(dateLabel(g.date))}</div><div class="list">${g.txs.map((x) => txRow(x)).join('')}</div>`).join('') : '<p class="muted">No transactions yet.</p>'}
-    </section>
+    </section>`}
   </main>`;
+}
+
+// ---------- selecting several transactions ----------
+
+function selectionList(acc, txs) {
+  const ids = selecting.ids;
+  const n = ids.size;
+  const all = n === txs.length;
+  const row = (t) => {
+    const on = ids.has(t.id);
+    return `<button class="row row-button select-row ${on ? 'on' : ''}" role="checkbox" aria-checked="${on}" data-action="select-toggle" data-id="${esc(t.id)}">
+      <span class="select-box" aria-hidden="true">${on ? icons.check : ''}</span>
+      <span class="row-main"><span class="row-title">${esc(t.payee || 'No description')}</span><span class="row-sub"><span>${esc(catName(t.category))}</span></span></span>
+      <span class="row-end"><span class="amount ${signedClass(t.amount)}">${money(t.amount, { sign: true, ...cur(acc) })}</span></span>
+    </button>`;
+  };
+  return `<section>
+      <div class="section-head"><h2>${n ? `${n} selected` : 'Select transactions'}</h2><button class="link" data-action="select-all">${all ? 'Select none' : 'Select all'}</button></div>
+      ${groupByDate(txs).map((g) => `<div class="date-head">${esc(dateLabel(g.date))}</div><div class="list">${g.txs.map(row).join('')}</div>`).join('')}
+    </section>
+    <div class="select-bar" role="toolbar" aria-label="Selected transactions">
+      <button class="button plain" data-action="select-cancel">Cancel</button>
+      <button class="button secondary" data-action="select-move" ${n && state.accounts.length > 1 ? '' : 'disabled'}>Move</button>
+      <button class="button danger" data-action="select-delete" ${n ? '' : 'disabled'}>Delete${n ? ` ${n}` : ''}</button>
+    </div>`;
+}
+
+function selectedTxs() {
+  return state.transactions.filter((t) => selecting?.ids.has(t.id));
+}
+
+// Moves transactions to another account, keeping what still makes sense there.
+function moveTransactions(txs, target) {
+  const bank = fundingBank(target);
+  for (const t of txs) {
+    const partner = transferPartner(state, t);
+    if (partner && partner.accountId === target.id) unlinkTransfer(state, t); // a transfer to itself isn't one
+    t.accountId = target.id;
+    if (t.paidFrom && (!bank || bank.id !== t.paidFrom)) delete t.paidFrom;
+    for (const p of state.plans) if (p.fromTx === t.id) p.accountId = target.id;
+  }
+}
+
+function showMoveSheet() {
+  const from = accountById(selecting.accountId);
+  const n = selecting.ids.size;
+  document.querySelector('.sheet')?.remove();
+  const sheet = document.createElement('div');
+  sheet.className = 'sheet';
+  sheet.setAttribute('role', 'dialog');
+  sheet.setAttribute('aria-label', 'Move to');
+  sheet.innerHTML = `<p class="row-title">Move ${n} transaction${n === 1 ? '' : 's'} to</p>
+    <div class="list">${state.accounts.filter((a) => a.id !== from.id).map((a) => `<button class="row row-button" data-move-to="${esc(a.id)}">${avatar(a)}<span class="row-main"><span class="row-title">${esc(a.name)}</span>${currencyOf(a) !== currencyOf(from) ? `<span class="row-sub">In ${currencyOf(a) === 'USD' ? 'dollars' : 'euro'}; the amounts stay the same numbers</span>` : ''}</span></button>`).join('')}</div>
+    <button class="button plain" data-move-to="">Cancel</button>`;
+  sheet.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-move-to]');
+    if (!b) return;
+    sheet.remove();
+    const target = accountById(b.dataset.moveTo);
+    if (!target) return;
+    const txs = selectedTxs();
+    const before = txs.map((t) => ({ t, accountId: t.accountId, paidFrom: t.paidFrom, transferId: t.transferId }));
+    moveTransactions(txs, target);
+    selecting = null;
+    commit();
+    toast(`Moved ${txs.length} to ${target.name}.`, { label: 'Undo', run: () => {
+      for (const x of before) { x.t.accountId = x.accountId; if (x.paidFrom) x.t.paidFrom = x.paidFrom; for (const p of state.plans) if (p.fromTx === x.t.id) p.accountId = x.accountId; }
+      commit();
+    } });
+  });
+  document.body.append(sheet);
 }
 
 const SHARES = [[100, 'All of it (100%)'], [50, 'Half (50%), e.g. a joint account'], [33, 'A third (33%)'], [25, 'A quarter (25%)']];
@@ -828,6 +912,7 @@ function viewSearch(qs) {
 function updateSearch(input) {
   clearTimeout(searchTimer);
   searchTimer = setTimeout(() => {
+    if (!location.hash.startsWith('#/search') || !document.getElementById('search-results')) return; // left the page meanwhile
     const dir = new URLSearchParams(location.hash.split('?')[1] || '').get('dir') || 'all';
     const hash = `#/search?${new URLSearchParams({ q: input.value, dir })}`;
     history.replaceState(null, '', hash);
@@ -1540,6 +1625,43 @@ function fixedCheck(id) {
 
 const actions = {
   lock: lockNow,
+  'select-start'(el) {
+    selecting = { accountId: el.dataset.account, ids: new Set() };
+    render();
+  },
+  'select-toggle'(el) {
+    const id = el.dataset.id;
+    if (selecting.ids.has(id)) selecting.ids.delete(id); else selecting.ids.add(id);
+    render();
+  },
+  'select-all'() {
+    const txs = state.transactions.filter((t) => t.accountId === selecting.accountId);
+    selecting.ids = selecting.ids.size === txs.length ? new Set() : new Set(txs.map((t) => t.id));
+    render();
+  },
+  'select-cancel'() {
+    selecting = null;
+    document.querySelector('.sheet')?.remove();
+    render();
+  },
+  'select-move'() {
+    if (selecting?.ids.size) showMoveSheet();
+  },
+  'select-delete'() {
+    const txs = selectedTxs();
+    if (!txs.length || !confirm(`Delete ${txs.length} transaction${txs.length === 1 ? '' : 's'}?`)) return;
+    const snapshot = { transactions: [...state.transactions], plans: [...state.plans] };
+    for (const t of txs) unlinkTransfer(state, t);
+    const gone = new Set(txs.map((t) => t.id));
+    state.transactions = state.transactions.filter((t) => !gone.has(t.id));
+    selecting = null;
+    commit();
+    toast(`Deleted ${txs.length}.`, { label: 'Undo', run: () => {
+      state.transactions = snapshot.transactions;
+      state.plans = snapshot.plans;
+      commit();
+    } });
+  },
   'clear-searches'() {
     state.settings.recentSearches = [];
     commit();

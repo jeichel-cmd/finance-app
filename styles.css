@@ -336,3 +336,21 @@ mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: in
 .split-matched summary { margin-bottom: 8px; }
 .likely-hint { color: var(--warn); }
 .split-cell .row-title { white-space: normal; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.toast { display: flex; align-items: center; gap: 14px; }
+.toast-action { border: 0; background: transparent; color: var(--accent-soft); font: inherit; font-weight: 700; cursor: pointer; padding: 4px 2px; }
+.select-row { display: flex; align-items: center; gap: 12px; }
+.select-box {
+  width: 24px; height: 24px; border-radius: 7px; border: 2px solid var(--ink-3); flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center; color: var(--accent-ink);
+}
+.select-row.on .select-box { background: var(--accent); border-color: var(--accent); }
+.select-row.on { background: var(--accent-soft); }
+.select-bar {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 15; display: flex; gap: 8px;
+  padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--surface); border-top: 1px solid var(--line);
+}
+.select-bar .button { flex: 1; }
+.select-bar .button:disabled { opacity: 0.45; }
+main.page:has(+ .select-bar), .page:has(.select-bar) { padding-bottom: 96px; }
+button.link { background: none; border: 0; padding: 0; font: inherit; font-weight: 600; cursor: pointer; }
+body:has(.select-bar) .toast { bottom: calc(84px + env(safe-area-inset-bottom)); }

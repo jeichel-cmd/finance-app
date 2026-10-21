@@ -402,6 +402,30 @@ await page.getByRole('searchbox').fill('');
 await page.getByRole('link', { name: 'Gehalt' }).waitFor();
 step('search payments');
 
+// Select several transactions: move them to another account (and undo), delete one (and undo).
+await page.goto(base + '#/');
+await page.locator('a.row[href^="#/account/"]', { hasText: 'Sparkasse Giro' }).first().click();
+await page.getByRole('button', { name: 'Select', exact: true }).click();
+await page.locator('.select-row', { hasText: 'Kino Ulm' }).click();
+await page.locator('.select-row', { hasText: 'Gehalt' }).click();
+await page.getByText('2 selected').waitFor();
+await shot('19-select');
+await page.getByRole('button', { name: 'Move' }).click();
+await page.locator('.sheet [data-move-to]', { hasText: 'PayPal' }).click();
+await page.getByText('Moved 2 to PayPal').waitFor();
+if (await page.locator('a.row', { hasText: 'Kino Ulm' }).count()) throw new Error('moved transaction still shown in Sparkasse');
+await page.getByRole('button', { name: 'Undo' }).click();
+await page.locator('a.row', { hasText: 'Kino Ulm' }).waitFor();
+page.once('dialog', (d) => d.accept());
+await page.getByRole('button', { name: 'Select', exact: true }).click();
+await page.locator('.select-row', { hasText: 'Kino Ulm' }).click();
+await page.getByRole('button', { name: 'Delete 1' }).click();
+await page.getByText('Deleted 1.').waitFor();
+if (await page.locator('a.row', { hasText: 'Kino Ulm' }).count()) throw new Error('deleted transaction still shown');
+await page.getByRole('button', { name: 'Undo' }).click();
+await page.locator('a.row', { hasText: 'Kino Ulm' }).waitFor();
+step('select, move and delete transactions');
+
 await browser.close();
 server.close();
 if (external.length) throw new Error('requests left the device: ' + external.join(', '));
